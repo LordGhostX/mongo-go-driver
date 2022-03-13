@@ -10,64 +10,42 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
 	"go.mongodb.org/mongo-driver/bson/bsoncodec"
 	"go.mongodb.org/mongo-driver/bson/bsonrw"
-	"go.mongodb.org/mongo-driver/internal/testutil/assert"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
 
 func TestUnmarshal(t *testing.T) {
-	for _, tc := range unmarshalingTestCases {
+	for _, tc := range unmarshalingTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.reg != nil {
-				t.Skip() // test requires custom registry
-			}
 			got := reflect.New(tc.sType).Interface()
 			err := Unmarshal(tc.data, got)
 			noerr(t, err)
-			if !cmp.Equal(got, tc.want) {
-				t.Errorf("Did not unmarshal as expected. got %v; want %v", got, tc.want)
-			}
+			assert.Equal(t, tc.want, got, "Did not unmarshal as expected.")
 		})
 	}
 }
 
 func TestUnmarshalWithRegistry(t *testing.T) {
-	for _, tc := range unmarshalingTestCases {
+	for _, tc := range unmarshalingTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			var reg *bsoncodec.Registry
-			if tc.reg != nil {
-				reg = tc.reg
-			} else {
-				reg = DefaultRegistry
-			}
 			got := reflect.New(tc.sType).Interface()
-			err := UnmarshalWithRegistry(reg, tc.data, got)
+			err := UnmarshalWithRegistry(DefaultRegistry, tc.data, got)
 			noerr(t, err)
-			if !cmp.Equal(got, tc.want) {
-				t.Errorf("Did not unmarshal as expected. got %v; want %v", got, tc.want)
-			}
+			assert.Equal(t, tc.want, got, "Did not unmarshal as expected.")
 		})
 	}
 }
 
 func TestUnmarshalWithContext(t *testing.T) {
-	for _, tc := range unmarshalingTestCases {
+	for _, tc := range unmarshalingTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			var reg *bsoncodec.Registry
-			if tc.reg != nil {
-				reg = tc.reg
-			} else {
-				reg = DefaultRegistry
-			}
-			dc := bsoncodec.DecodeContext{Registry: reg}
+			dc := bsoncodec.DecodeContext{Registry: DefaultRegistry}
 			got := reflect.New(tc.sType).Interface()
 			err := UnmarshalWithContext(dc, tc.data, got)
 			noerr(t, err)
-			if !cmp.Equal(got, tc.want) {
-				t.Errorf("Did not unmarshal as expected. got %v; want %v", got, tc.want)
-			}
+			assert.Equal(t, tc.want, got, "Did not unmarshal as expected.")
 		})
 	}
 }
@@ -80,9 +58,7 @@ func TestUnmarshalExtJSONWithRegistry(t *testing.T) {
 		err := UnmarshalExtJSONWithRegistry(DefaultRegistry, data, true, &got)
 		noerr(t, err)
 		want := teststruct{1}
-		if !cmp.Equal(got, want) {
-			t.Errorf("Did not unmarshal as expected. got %v; want %v", got, want)
-		}
+		assert.Equal(t, want, got, "Did not unmarshal as expected.")
 	})
 
 	t.Run("UnmarshalExtJSONInvalidInput", func(t *testing.T) {
@@ -140,7 +116,7 @@ func TestUnmarshalExtJSONWithContext(t *testing.T) {
 			want:  &fooString{Foo: "�"},
 		},
 		{
-			name:  "Low surrogate value with no preceeding high surrogate value",
+			name:  "Low surrogate value with no preceding high surrogate value",
 			sType: reflect.TypeOf(fooString{}),
 			data:  []byte(`{"foo":"abc \uDd1e 123"}`),
 			want:  &fooString{Foo: "abc � 123"},
@@ -165,9 +141,7 @@ func TestUnmarshalExtJSONWithContext(t *testing.T) {
 			dc := bsoncodec.DecodeContext{Registry: DefaultRegistry}
 			err := UnmarshalExtJSONWithContext(dc, tc.data, true, got)
 			noerr(t, err)
-			if !cmp.Equal(got, tc.want) {
-				t.Errorf("Did not unmarshal as expected. got %+v; want %+v", got, tc.want)
-			}
+			assert.Equal(t, tc.want, got, "Did not unmarshal as expected.")
 		})
 	}
 }
@@ -188,7 +162,7 @@ func TestCachingDecodersNotSharedAcrossRegistries(t *testing.T) {
 		return nil
 	}
 	customReg := NewRegistryBuilder().
-		RegisterTypeDecoder(tInt32, bsoncodec.ValueDecoderFunc(decodeInt32)).
+		RegisterTypeDecoder(tInt32, decodeInt32).
 		Build()
 
 	docBytes := bsoncore.BuildDocumentFromElements(

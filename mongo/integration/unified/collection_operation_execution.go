@@ -169,7 +169,7 @@ func executeCountDocuments(ctx context.Context, operation *operation) (*operatio
 			}
 			opts.SetCollation(collation)
 		case "filter":
-			filter = bson.Raw(val.Document())
+			filter = val.Document()
 		case "hint":
 			hint, err := createHint(val)
 			if err != nil {
@@ -177,7 +177,7 @@ func executeCountDocuments(ctx context.Context, operation *operation) (*operatio
 			}
 			opts.SetHint(hint)
 		case "limit":
-			opts.SetLimit(int64(val.Int64()))
+			opts.SetLimit(val.Int64())
 		case "maxTimeMS":
 			opts.SetMaxTime(time.Duration(val.Int32()) * time.Millisecond)
 		case "skip":
@@ -271,6 +271,9 @@ func executeCreateIndex(ctx context.Context, operation *operation) (*operationRe
 		Options: indexOpts,
 	}
 	name, err := coll.Indexes().CreateOne(ctx, model)
+	if err != nil {
+		return nil, err
+	}
 	return newValueResult(bsontype.String, bsoncore.AppendString(nil, name), nil), nil
 }
 
@@ -303,6 +306,8 @@ func executeDeleteOne(ctx context.Context, operation *operation) (*operationResu
 				return nil, fmt.Errorf("error creating hint: %v", err)
 			}
 			opts.SetHint(hint)
+		case "let":
+			opts.SetLet(val.Document())
 		default:
 			return nil, fmt.Errorf("unrecognized deleteOne option %q", key)
 		}
@@ -350,6 +355,8 @@ func executeDeleteMany(ctx context.Context, operation *operation) (*operationRes
 				return nil, fmt.Errorf("error creating hint: %v", err)
 			}
 			opts.SetHint(hint)
+		case "let":
+			opts.SetLet(val.Document())
 		default:
 			return nil, fmt.Errorf("unrecognized deleteMany option %q", key)
 		}
@@ -514,6 +521,8 @@ func executeFindOneAndDelete(ctx context.Context, operation *operation) (*operat
 			opts.SetProjection(val.Document())
 		case "sort":
 			opts.SetSort(val.Document())
+		case "let":
+			opts.SetLet(val.Document())
 		default:
 			return nil, fmt.Errorf("unrecognized findOneAndDelete option %q", key)
 		}
@@ -558,6 +567,8 @@ func executeFindOneAndReplace(ctx context.Context, operation *operation) (*opera
 				return nil, fmt.Errorf("error creating hint: %v", err)
 			}
 			opts.SetHint(hint)
+		case "let":
+			opts.SetLet(val.Document())
 		case "maxTimeMS":
 			opts.SetMaxTime(time.Duration(val.Int32()) * time.Millisecond)
 		case "projection":
@@ -628,6 +639,8 @@ func executeFindOneAndUpdate(ctx context.Context, operation *operation) (*operat
 				return nil, fmt.Errorf("error creating hint: %v", err)
 			}
 			opts.SetHint(hint)
+		case "let":
+			opts.SetLet(val.Document())
 		case "maxTimeMS":
 			opts.SetMaxTime(time.Duration(val.Int32()) * time.Millisecond)
 		case "projection":
@@ -819,6 +832,8 @@ func executeReplaceOne(ctx context.Context, operation *operation) (*operationRes
 			replacement = val.Document()
 		case "upsert":
 			opts.SetUpsert(val.Boolean())
+		case "let":
+			opts.SetLet(val.Document())
 		default:
 			return nil, fmt.Errorf("unrecognized replaceOne option %q", key)
 		}
@@ -932,6 +947,8 @@ func createFindCursor(ctx context.Context, operation *operation) (*cursorResult,
 				return nil, fmt.Errorf("error creating hint: %v", err)
 			}
 			opts.SetHint(hint)
+		case "let":
+			opts.SetLet(val.Document())
 		case "limit":
 			opts.SetLimit(int64(val.Int32()))
 		case "max":

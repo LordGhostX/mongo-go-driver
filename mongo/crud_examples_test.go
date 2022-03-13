@@ -664,6 +664,9 @@ func ExampleWithSession() {
 			// changed to have a timeout.
 			return sess.CommitTransaction(context.Background())
 		})
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func ExampleClient_UseSessionWithOptions() {
@@ -871,7 +874,7 @@ func ExampleCursor_TryNext() {
 		}
 
 		// If TryNext returns false, the next document is not yet available, the
-		// cursor was exhausted and was closed, or an error occured. TryNext
+		// cursor was exhausted and was closed, or an error occurred. TryNext
 		// should only be called again for the empty batch case.
 		if err := cursor.Err(); err != nil {
 			log.Fatal(err)

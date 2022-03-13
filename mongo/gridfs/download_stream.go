@@ -243,7 +243,14 @@ func (ds *DownloadStream) fillBuffer(ctx context.Context) error {
 		return err
 	}
 
-	if chunkIndex.Int32() != ds.expectedChunk {
+	var chunkIndexInt32 int32
+	if chunkIndexInt64, ok := chunkIndex.Int64OK(); ok {
+		chunkIndexInt32 = int32(chunkIndexInt64)
+	} else {
+		chunkIndexInt32 = chunkIndex.Int32()
+	}
+
+	if chunkIndexInt32 != ds.expectedChunk {
 		return ErrWrongIndex
 	}
 
@@ -260,7 +267,7 @@ func (ds *DownloadStream) fillBuffer(ctx context.Context) error {
 	if ds.expectedChunk == ds.numChunks {
 		// final chunk can be fewer than ds.chunkSize bytes
 		bytesDownloaded := int64(ds.chunkSize) * (int64(ds.expectedChunk) - int64(1))
-		bytesRemaining := ds.fileLen - int64(bytesDownloaded)
+		bytesRemaining := ds.fileLen - bytesDownloaded
 
 		if int64(bytesLen) != bytesRemaining {
 			return ErrWrongSize

@@ -18,7 +18,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.mongodb.org/mongo-driver/event"
 	"go.mongodb.org/mongo-driver/internal"
 	"go.mongodb.org/mongo-driver/mongo/address"
 	"go.mongodb.org/mongo-driver/mongo/description"
@@ -32,7 +31,7 @@ var globalConnectionID uint64 = 1
 
 var (
 	defaultMaxMessageSize        uint32 = 48000000
-	errResponseTooLarge          error  = errors.New("length of read message too large")
+	errResponseTooLarge                 = errors.New("length of read message too large")
 	errLoadBalancedStateMismatch        = errors.New("driver attempted to initialize in load balancing mode, but the server does not support this mode")
 )
 
@@ -51,14 +50,12 @@ type connection struct {
 	idleDeadline         atomic.Value // Stores a time.Time
 	readTimeout          time.Duration
 	writeTimeout         time.Duration
-	descMu               sync.RWMutex // Guards desc. TODO: Remove with or after GODRIVER-2038.
 	desc                 description.Server
 	helloRTT             time.Duration
 	compressor           wiremessage.CompressorID
 	zliblevel            int
 	zstdLevel            int
 	connectDone          chan struct{}
-	connectErr           error
 	config               *connectionConfig
 	cancelConnectContext context.CancelFunc
 	connectContextMade   chan struct{}
@@ -69,19 +66,14 @@ type connection struct {
 	serverConnectionID   *int32 // the server's ID for this client's connection
 
 	// pool related fields
-	pool         *pool
-	poolID       uint64
-	generation   uint64
-	expireReason string
-	poolMonitor  *event.PoolMonitor
+	pool       *pool
+	poolID     uint64
+	generation uint64
 }
 
 // newConnection handles the creation of a connection. It does not connect the connection.
-func newConnection(addr address.Address, opts ...ConnectionOption) (*connection, error) {
-	cfg, err := newConnectionConfig(opts...)
-	if err != nil {
-		return nil, err
-	}
+func newConnection(addr address.Address, opts ...ConnectionOption) *connection {
+	cfg := newConnectionConfig(opts...)
 
 	id := fmt.Sprintf("%s[-%d]", addr, nextConnectionID())
 
@@ -95,7 +87,6 @@ func newConnection(addr address.Address, opts ...ConnectionOption) (*connection,
 		config:               cfg,
 		connectContextMade:   make(chan struct{}),
 		cancellationListener: internal.NewCancellationListener(),
-		poolMonitor:          cfg.poolMonitor,
 	}
 	// Connections to non-load balanced deployments should eagerly set the generation numbers so errors encountered
 	// at any point during connection establishment can be processed without the connection being considered stale.
@@ -104,19 +95,7 @@ func newConnection(addr address.Address, opts ...ConnectionOption) (*connection,
 	}
 	atomic.StoreInt64(&c.connected, initialized)
 
-	return c, nil
-}
-
-func (c *connection) processInitializationError(opCtx context.Context, err error) {
-	atomic.StoreInt64(&c.connected, disconnected)
-	if c.nc != nil {
-		_ = c.nc.Close()
-	}
-
-	c.connectErr = ConnectionError{Wrapped: err, init: true}
-	if c.config.errorHandlingCallback != nil {
-		c.config.errorHandlingCallback(opCtx, c.connectErr, c.generation, c.desc.ServiceID)
-	}
+	return c
 }
 
 // setGenerationNumber sets the connection's generation number if a callback has been provided to do so in connection
@@ -140,13 +119,27 @@ func (c *connection) hasGenerationNumber() bool {
 	return c.desc.LoadBalanced()
 }
 
-// connect handles the I/O for a connection. It will dial, configure TLS, and perform
-// initialization handshakes.
-func (c *connection) connect(ctx context.Context) {
+// connect handles the I/O for a connection. It will dial, configure TLS, and perform initialization
+// handshakes. All errors returned by connect are considered "before the handshake completes" and
+// must be handled by calling the appropriate SDAM handshake error handler.
+func (c *connection) connect(ctx context.Context) (err error) {
 	if !atomic.CompareAndSwapInt64(&c.connected, initialized, connected) {
-		return
+		return nil
 	}
+
 	defer close(c.connectDone)
+
+	// If connect returns an error, set the connection status as disconnected and close the
+	// underlying net.Conn if it was created.
+	defer func() {
+		if err != nil {
+			atomic.StoreInt64(&c.connected, disconnected)
+
+			if c.nc != nil {
+				_ = c.nc.Close()
+			}
+		}
+	}()
 
 	// Create separate contexts for dialing a connection and doing the MongoDB/auth handshakes.
 	//
@@ -186,12 +179,9 @@ func (c *connection) connect(ctx context.Context) {
 	close(c.connectContextMade)
 
 	// Assign the result of DialContext to a temporary net.Conn to ensure that c.nc is not set in an error case.
-	var err error
-	var tempNc net.Conn
-	tempNc, err = c.config.dialer.DialContext(dialCtx, c.addr.Network(), c.addr.String())
+	tempNc, err := c.config.dialer.DialContext(dialCtx, c.addr.Network(), c.addr.String())
 	if err != nil {
-		c.processInitializationError(ctx, err)
-		return
+		return ConnectionError{Wrapped: err, init: true}
 	}
 	c.nc = tempNc
 
@@ -206,8 +196,7 @@ func (c *connection) connect(ctx context.Context) {
 		}
 		tlsNc, err := configureTLS(dialCtx, c.config.tlsConnectionSource, c.nc, c.addr, tlsConfig, ocspOpts)
 		if err != nil {
-			c.processInitializationError(ctx, err)
-			return
+			return ConnectionError{Wrapped: err, init: true}
 		}
 		c.nc = tlsNc
 	}
@@ -217,14 +206,7 @@ func (c *connection) connect(ctx context.Context) {
 	// running hello and authentication is handled by a handshaker on the configuration instance.
 	handshaker := c.config.handshaker
 	if handshaker == nil {
-		if c.poolMonitor != nil {
-			c.poolMonitor.Event(&event.PoolEvent{
-				Type:         event.ConnectionReady,
-				Address:      c.addr.String(),
-				ConnectionID: c.poolID,
-			})
-		}
-		return
+		return nil
 	}
 
 	var handshakeInfo driver.HandshakeInformation
@@ -232,12 +214,9 @@ func (c *connection) connect(ctx context.Context) {
 	handshakeConn := initConnection{c}
 	handshakeInfo, err = handshaker.GetHandshakeInformation(handshakeCtx, c.addr, handshakeConn)
 	if err == nil {
-		// We only need to retain the Description field and the server connection ID. The authentication-related
-		// fields in handshakeInfo are tracked by the handshaker if necessary. We also lock the description mutex
-		// before setting the server description.
-		c.descMu.Lock()
+		// We only need to retain the Description field as the connection's description. The authentication-related
+		// fields in handshakeInfo are tracked by the handshaker if necessary.
 		c.desc = handshakeInfo.Description
-		c.descMu.Unlock()
 		c.serverConnectionID = handshakeInfo.ServerConnectionID
 		c.helloRTT = time.Since(handshakeStartTime)
 
@@ -262,8 +241,7 @@ func (c *connection) connect(ctx context.Context) {
 
 	// We have a failed handshake here
 	if err != nil {
-		c.processInitializationError(ctx, err)
-		return
+		return ConnectionError{Wrapped: err, init: true}
 	}
 
 	if len(c.desc.Compression) > 0 {
@@ -294,20 +272,13 @@ func (c *connection) connect(ctx context.Context) {
 			}
 		}
 	}
-	if c.poolMonitor != nil {
-		c.poolMonitor.Event(&event.PoolEvent{
-			Type:         event.ConnectionReady,
-			Address:      c.addr.String(),
-			ConnectionID: c.poolID,
-		})
-	}
+	return nil
 }
 
-func (c *connection) wait() error {
+func (c *connection) wait() {
 	if c.connectDone != nil {
 		<-c.connectDone
 	}
-	return c.connectErr
 }
 
 func (c *connection) closeConnectContext() {
@@ -718,7 +689,7 @@ func (c *Connection) Expire() error {
 }
 
 func (c *Connection) cleanupReferences() error {
-	err := c.pool.put(c.connection)
+	err := c.pool.checkIn(c.connection)
 	if c.cleanupPoolFn != nil {
 		c.cleanupPoolFn()
 		c.cleanupPoolFn = nil
@@ -821,9 +792,6 @@ func (c *Connection) unpin(reason string) error {
 	return nil
 }
 
-var notPrimaryCodes = []int32{10107, 13435}
-var recoveringCodes = []int32{11600, 11602, 13436, 189, 91}
-
 func configureTLS(ctx context.Context,
 	tlsConnSource tlsConnectionSource,
 	nc net.Conn,
@@ -831,7 +799,6 @@ func configureTLS(ctx context.Context,
 	config *tls.Config,
 	ocspOpts *ocsp.VerifyOptions,
 ) (net.Conn, error) {
-
 	// Ensure config.ServerName is always set for SNI.
 	if config.ServerName == "" {
 		hostname := addr.String()
@@ -845,27 +812,15 @@ func configureTLS(ctx context.Context,
 	}
 
 	client := tlsConnSource.Client(nc, config)
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- client.Handshake()
-	}()
+	if err := clientHandshake(ctx, client); err != nil {
+		return nil, err
+	}
 
-	select {
-	case err := <-errChan:
-		if err != nil {
-			return nil, err
-		}
-
-		// Only do OCSP verification if TLS verification is requested.
-		if config.InsecureSkipVerify {
-			break
-		}
-
+	// Only do OCSP verification if TLS verification is requested.
+	if !config.InsecureSkipVerify {
 		if ocspErr := ocsp.Verify(ctx, client.ConnectionState(), ocspOpts); ocspErr != nil {
 			return nil, ocspErr
 		}
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
 	return client, nil
 }

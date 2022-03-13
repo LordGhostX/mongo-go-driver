@@ -17,6 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+	"go.mongodb.org/mongo-driver/tag"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/session"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/uuid"
@@ -398,6 +399,25 @@ func TestOperation(t *testing.T) {
 				readpref.SecondaryPreferred(readpref.WithTags("disk", "ssd", "use", "reporting")),
 				description.RSSecondary, description.ReplicaSet, false, rpWithTags,
 			},
+			// GODRIVER-2205: Ensure empty tag sets are written as an empty document in the read
+			// preference document. Empty tag sets match any server and are used as a fallback when
+			// no other tag sets match any servers.
+			{
+				"secondaryPreferred/withTags/emptyTagSet",
+				readpref.SecondaryPreferred(readpref.WithTagSets(
+					tag.Set{{Name: "disk", Value: "ssd"}},
+					tag.Set{})),
+				description.RSSecondary,
+				description.ReplicaSet,
+				false,
+				bsoncore.NewDocumentBuilder().
+					AppendString("mode", "secondaryPreferred").
+					AppendArray("tags", bsoncore.NewArrayBuilder().
+						AppendDocument(bsoncore.NewDocumentBuilder().AppendString("disk", "ssd").Build()).
+						AppendDocument(bsoncore.NewDocumentBuilder().Build()).
+						Build()).
+					Build(),
+			},
 			{
 				"secondaryPreferred/withMaxStaleness",
 				readpref.SecondaryPreferred(readpref.WithMaxStaleness(25 * time.Second)),
@@ -429,7 +449,8 @@ func TestOperation(t *testing.T) {
 		for _, tc := range testCases {
 			tc := tc
 			t.Run(tc.name, func(t *testing.T) {
-				got, err := Operation{ReadPreference: tc.rp}.createReadPref(tc.serverKind, tc.topoKind, tc.opQuery)
+				desc := description.SelectedServer{Kind: tc.topoKind, Server: description.Server{Kind: tc.serverKind}}
+				got, err := Operation{ReadPreference: tc.rp}.createReadPref(desc, tc.opQuery)
 				if err != nil {
 					t.Fatalf("error creating read pref: %v", err)
 				}
@@ -535,7 +556,7 @@ func TestOperation(t *testing.T) {
 		serverResponseDoc := bsoncore.BuildDocumentFromElements(nil,
 			bsoncore.AppendInt32Element(nil, "ok", 1),
 		)
-		nonStreamingResponse := createExhaustServerResponse(t, serverResponseDoc, false)
+		nonStreamingResponse := createExhaustServerResponse(serverResponseDoc, false)
 
 		// Create a connection that reports that it cannot stream messages.
 		conn := &mockConnection{
@@ -563,7 +584,7 @@ func TestOperation(t *testing.T) {
 		assert.False(t, conn.CurrentlyStreaming(), "expected CurrentlyStreaming to be false")
 
 		// Modify the connection to report that it can stream and create a new server response with moreToCome=true.
-		streamingResponse := createExhaustServerResponse(t, serverResponseDoc, true)
+		streamingResponse := createExhaustServerResponse(serverResponseDoc, true)
 		conn.rReadWM = streamingResponse
 		conn.rCanStream = true
 		err = op.Execute(context.TODO(), nil)
@@ -580,7 +601,7 @@ func TestOperation(t *testing.T) {
 	})
 }
 
-func createExhaustServerResponse(t *testing.T, response bsoncore.Document, moreToCome bool) []byte {
+func createExhaustServerResponse(response bsoncore.Document, moreToCome bool) []byte {
 	idx, wm := wiremessage.AppendHeaderStart(nil, 0, wiremessage.CurrentRequestID()+1, wiremessage.OpMsg)
 	var flags wiremessage.MsgFlag
 	if moreToCome {
@@ -668,4 +689,68 @@ func (m *mockConnection) WriteWireMessage(_ context.Context, wm []byte) error {
 func (m *mockConnection) ReadWireMessage(_ context.Context, dst []byte) ([]byte, error) {
 	m.pReadDst = dst
 	return m.rReadWM, m.rReadErr
+}
+
+type retryableError struct {
+	error
+}
+
+func (retryableError) Retryable() bool { return true }
+
+var _ RetryablePoolError = retryableError{}
+
+// mockRetryServer is used to test retry of connection checkout. Returns a retryable error from
+// Connection().
+type mockRetryServer struct {
+	numCallsToConnection int
+}
+
+// Connection records the number of calls and returns retryable errors until the provided context
+// times out or is cancelled, then returns the context error.
+func (ms *mockRetryServer) Connection(ctx context.Context) (Connection, error) {
+	ms.numCallsToConnection++
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	time.Sleep(1 * time.Millisecond)
+	return nil, retryableError{error: errors.New("test error")}
+}
+
+func (ms *mockRetryServer) MinRTT() time.Duration {
+	return 0
+}
+
+func TestRetry(t *testing.T) {
+	t.Run("retries multiple times with RetryContext", func(t *testing.T) {
+		d := new(mockDeployment)
+		ms := new(mockRetryServer)
+		d.returns.server = ms
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		retry := RetryContext
+		err := Operation{
+			CommandFn:  func([]byte, description.SelectedServer) ([]byte, error) { return nil, nil },
+			Deployment: d,
+			Database:   "testing",
+			RetryMode:  &retry,
+			Type:       Read,
+		}.Execute(ctx, nil)
+		assert.NotNil(t, err, "expected an error from Execute()")
+
+		// Expect Connection() to be called at least 3 times. The first call is the initial attempt
+		// to run the operation and the second is the retry. The third indicates that we retried
+		// more than once, which is the behavior we want to assert.
+		assert.True(t,
+			ms.numCallsToConnection >= 3,
+			"expected Connection() to be called at least 3 times")
+
+		deadline, _ := ctx.Deadline()
+		assert.True(t,
+			time.Now().After(deadline),
+			"expected operation to complete only after the context deadline is exceeded")
+	})
 }

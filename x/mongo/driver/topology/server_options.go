@@ -19,21 +19,25 @@ import (
 var defaultRegistry = bson.NewRegistryBuilder().Build()
 
 type serverConfig struct {
-	clock                     *session.ClusterClock
-	compressionOpts           []string
-	connectionOpts            []ConnectionOption
-	appname                   string
-	heartbeatInterval         time.Duration
-	heartbeatTimeout          time.Duration
-	maxConns                  uint64
-	minConns                  uint64
-	poolMonitor               *event.PoolMonitor
-	serverMonitor             *event.ServerMonitor
-	connectionPoolMaxIdleTime time.Duration
-	registry                  *bsoncodec.Registry
-	monitoringDisabled        bool
-	serverAPI                 *driver.ServerAPIOptions
-	loadBalanced              bool
+	clock              *session.ClusterClock
+	compressionOpts    []string
+	connectionOpts     []ConnectionOption
+	appname            string
+	heartbeatInterval  time.Duration
+	heartbeatTimeout   time.Duration
+	serverMonitor      *event.ServerMonitor
+	registry           *bsoncodec.Registry
+	monitoringDisabled bool
+	serverAPI          *driver.ServerAPIOptions
+	loadBalanced       bool
+
+	// Connection pool options.
+	maxConns             uint64
+	minConns             uint64
+	maxConnecting        uint64
+	poolMonitor          *event.PoolMonitor
+	poolMaxIdleTime      time.Duration
+	poolMaintainInterval time.Duration
 }
 
 func newServerConfig(opts ...ServerOption) (*serverConfig, error) {
@@ -106,7 +110,7 @@ func WithHeartbeatTimeout(fn func(time.Duration) time.Duration) ServerOption {
 }
 
 // WithMaxConnections configures the maximum number of connections to allow for
-// a given server. If max is 0, then the default will be math.MaxInt64.
+// a given server. If max is 0, then maximum connection pool size is not limited.
 func WithMaxConnections(fn func(uint64) uint64) ServerOption {
 	return func(cfg *serverConfig) error {
 		cfg.maxConns = fn(cfg.maxConns)
@@ -124,12 +128,31 @@ func WithMinConnections(fn func(uint64) uint64) ServerOption {
 	}
 }
 
+// WithMaxConnecting configures the maximum number of connections a connection
+// pool may establish simultaneously. If maxConnecting is 0, the default value
+// of 2 is used.
+func WithMaxConnecting(fn func(uint64) uint64) ServerOption {
+	return func(cfg *serverConfig) error {
+		cfg.maxConnecting = fn(cfg.maxConnecting)
+		return nil
+	}
+}
+
 // WithConnectionPoolMaxIdleTime configures the maximum time that a connection can remain idle in the connection pool
 // before being removed. If connectionPoolMaxIdleTime is 0, then no idle time is set and connections will not be removed
 // because of their age
 func WithConnectionPoolMaxIdleTime(fn func(time.Duration) time.Duration) ServerOption {
 	return func(cfg *serverConfig) error {
-		cfg.connectionPoolMaxIdleTime = fn(cfg.connectionPoolMaxIdleTime)
+		cfg.poolMaxIdleTime = fn(cfg.poolMaxIdleTime)
+		return nil
+	}
+}
+
+// WithConnectionPoolMaintainInterval configures the interval that the background connection pool
+// maintenance goroutine runs.
+func WithConnectionPoolMaintainInterval(fn func(time.Duration) time.Duration) ServerOption {
+	return func(cfg *serverConfig) error {
+		cfg.poolMaintainInterval = fn(cfg.poolMaintainInterval)
 		return nil
 	}
 }

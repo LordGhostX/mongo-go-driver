@@ -34,44 +34,57 @@ functions:
       params:
         working_dir: src/go.mongodb.org/mongo-driver
         script: |
-          if [ "Windows_NT" = "$OS" ]; then
-             export GOPATH=$(cygpath -w $(dirname $(dirname $(dirname `pwd`))))
-          else
-             export GOPATH=$(dirname $(dirname $(dirname `pwd`)))
-          fi;
-
-          # Get the current unique version of this checkout
+          # Get the current unique version of this checkout.
           if [ "${is_patch}" = "true" ]; then
              CURRENT_VERSION=$(git describe)-patch-${version_id}
           else
              CURRENT_VERSION=latest
           fi
 
-          export DRIVERS_TOOLS="$(pwd)/../drivers-tools"
-          export PROJECT_DIRECTORY="$(pwd)"
+          # Set Golang environment vars. GOROOT is wherever current Go distribution is; GOPATH is always 3
+          # directories up from pwd; GOCACHE is under .cache in the pwd.
+          export GOROOT="${GO_DIST}"
+          export GOPATH="$(dirname $(dirname $(dirname `pwd`)))"
           export GOCACHE="$(pwd)/.cache"
 
-          # Python has cygwin path problems on Windows. Detect prospective mongo-orchestration home directory
-          if [ "Windows_NT" = "$OS" ]; then # Magic variable in cygwin
-             export DRIVERS_TOOLS=$(cygpath -m $DRIVERS_TOOLS)
-             export PROJECT_DIRECTORY=$(cygpath -m $PROJECT_DIRECTORY)
-             export GOCACHE=$(cygpath -m $GOCACHE)
-          fi
-
+          # Set other relevant variables for Evergreen processes.
+          export DRIVERS_TOOLS="$(pwd)/../drivers-tools"
+          export PROJECT_DIRECTORY="$(pwd)"
           export MONGO_ORCHESTRATION_HOME="$DRIVERS_TOOLS/.evergreen/orchestration"
           export MONGODB_BINARIES="$DRIVERS_TOOLS/mongodb/bin"
           export UPLOAD_BUCKET="${project}"
-          export PATH="${GO_DIST}/bin:${GCC_PATH}:$GOPATH/bin:$MONGODB_BINARIES:$PATH"
           export PROJECT="${project}"
 
+          # If on Windows, convert paths with cygpath. GOROOT should not be converted as Windows expects it
+          # to be separated with '\'.
           if [ "Windows_NT" = "$OS" ]; then
+             export GOPATH=$(cygpath -m $GOPATH)
+             export GOCACHE=$(cygpath -m $GOCACHE)
+             export DRIVERS_TOOLS=$(cygpath -m $DRIVERS_TOOLS)
+             export PROJECT_DIRECTORY=$(cygpath -m $PROJECT_DIRECTORY)
+             export MONGO_ORCHESTRATION_HOME=$(cygpath -m $MONGO_ORCHESTRATION_HOME)
+             export MONGODB_BINARIES=$(cygpath -m $MONGODB_BINARIES)
+             export UPLOAD_BUCKET=$(cygpath -m $UPLOAD_BUCKET)
+             export PROJECT=$(cygpath -m $PROJECT)
+
+             # Set home variables for Windows, too.
              export USERPROFILE=$(cygpath -w $(dirname $(dirname $(dirname `pwd`))))
-             export HOME=$(cygpath -w $(dirname $(dirname $(dirname `pwd`))))
+             export HOME=$USERPROFILE
           fi
 
+          # Set actual PATH. PATH should contain binaries from GOROOT, GOPATH, GCC_PATH and mongodb.
+          # Adding GOROOT's bin to PATH on Windows requires a cygpath conversion.
+          export GOROOTBIN="$GOROOT/bin"
+          if [ "Windows_NT" = "$OS" ]; then
+             export GOROOTBIN=$(cygpath -m $GOROOTBIN)
+          fi
+          export PATH="$GOROOTBIN:$GOPATH/bin:${GCC_PATH}:$MONGODB_BINARIES:$PATH"
+
+          # Check Go installation.
           go version
           go env
 
+          # Install libmongocrypt based on OS.
           if [ "Windows_NT" = "$OS" ]; then
              mkdir -p c:/libmongocrypt/include
              mkdir -p c:/libmongocrypt/bin
@@ -94,21 +107,21 @@ functions:
           PROJECT_DIRECTORY: "$PROJECT_DIRECTORY"
           PREPARE_SHELL: |
              set -o errexit
+             export GOROOT="$GOROOT"
              export GOPATH="$GOPATH"
-             export GOROOT="${GO_DIST}"
              export GOCACHE="$GOCACHE"
              export DRIVERS_TOOLS="$DRIVERS_TOOLS"
+             export PROJECT_DIRECTORY="$PROJECT_DIRECTORY"
              export MONGO_ORCHESTRATION_HOME="$MONGO_ORCHESTRATION_HOME"
              export MONGODB_BINARIES="$MONGODB_BINARIES"
              export UPLOAD_BUCKET="$UPLOAD_BUCKET"
-             export PROJECT_DIRECTORY="$PROJECT_DIRECTORY"
-             export TMPDIR="$MONGO_ORCHESTRATION_HOME/db"
-             export PATH="$PATH"
              export PROJECT="$PROJECT"
+             export TMPDIR="$MONGO_ORCHESTRATION_HOME/db"
              export PKG_CONFIG_PATH=$(pwd)/install/libmongocrypt/lib/pkgconfig:$(pwd)/install/mongo-c-driver/lib/pkgconfig
              export LD_LIBRARY_PATH=$(pwd)/install/libmongocrypt/lib
+             export PATH="$PATH"
           EOT
-          # See what we've done
+          # See what we variables we've set.
           cat expansion.yml
     # Load the expansion file to make an evergreen variable with the current unique version
     - command: expansions.update
@@ -125,7 +138,7 @@ functions:
             # If this was a patch build, doing a fresh clone would not actually test the patch
             cp -R ${PROJECT_DIRECTORY}/ $DRIVERS_TOOLS
           else
-            git clone git://github.com/mongodb-labs/drivers-evergreen-tools.git $DRIVERS_TOOLS
+            git clone https://github.com/mongodb-labs/drivers-evergreen-tools.git $DRIVERS_TOOLS
           fi
           echo "{ \"releases\": { \"default\": \"$MONGODB_BINARIES\" }}" > $MONGO_ORCHESTRATION_HOME/orchestration.config
     - command: shell.exec
@@ -134,18 +147,21 @@ functions:
         script: |
           ${PREPARE_SHELL}
 
-          # Install any go tools that we need. Do this in a temp directory because running "go get" inside the driver
-          # repo will update the driver's go.mod/go.sum files. This puts the contents of go.mod/go.sum out of sync with
-          # the vendor directory and tests fail to compile due to inconsistent vendoring.
-          cd $(mktemp -d)
-          go get -u golang.org/x/lint/golint
-          go get -u github.com/kisielk/errcheck
-          go get -u github.com/walle/lll/...
-          cd -
-
           # initialize submodules
           git submodule init
           git submodule update
+
+  install-linters:
+    - command: shell.exec
+      params:
+        working_dir: src/go.mongodb.org/mongo-driver
+        script: |
+          ${PREPARE_SHELL}
+
+          # Install linters. Use "go install" instead of "go get" to prevent modifying the go.mod
+          # file.
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          go install github.com/walle/lll/...@latest
 
   upload-mo-artifacts:
     - command: shell.exec
@@ -193,6 +209,7 @@ functions:
           SSL=${SSL} \
           ORCHESTRATION_FILE=${ORCHESTRATION_FILE} \
           REQUIRE_API_VERSION=${REQUIRE_API_VERSION} \
+          LOAD_BALANCER=${LOAD_BALANCER} \
           sh ${DRIVERS_TOOLS}/.evergreen/run-orchestration.sh
     - command: expansions.update
       params:
@@ -280,9 +297,8 @@ functions:
           sh ${PROJECT_DIRECTORY}/.evergreen/run-tests.sh
 
   send-perf-data:
-    - command: json.send
+    - command: perf.send
       params:
-        name: perf
         file: src/go.mongodb.org/mongo-driver/perf.json
 
   run-enterprise-auth-tests:
@@ -840,7 +856,39 @@ functions:
         background: true
         script: |
           cd ${DRIVERS_TOOLS}/.evergreen/csfle
-          ./kmstlsvenv/bin/python3 -u kms_http_server.py -v --ca_file ../x509gen/ca.pem --cert_file ../x509gen/${CERT_FILE} --port 8000
+          ./kmstlsvenv/bin/python3 -u kms_http_server.py -v --ca_file ../x509gen/ca.pem --cert_file ../x509gen/${CERT_FILE} --port ${PORT}
+
+  start-kms-mock-server-require-client-cert:
+    - command: shell.exec
+      params:
+        script: |
+          ${PREPARE_SHELL}
+
+          cd ${DRIVERS_TOOLS}/.evergreen/csfle
+          . ./activate_venv.sh
+    - command: shell.exec
+      params:
+        background: true
+        script: |
+          cd ${DRIVERS_TOOLS}/.evergreen/csfle
+          ./kmstlsvenv/bin/python3 -u kms_http_server.py -v --ca_file ../x509gen/ca.pem --cert_file ../x509gen/${CERT_FILE} --port ${PORT} --require_client_cert
+
+  start-kms-kmip-server:
+    - command: shell.exec
+      params:
+        script: |
+          ${PREPARE_SHELL}
+
+          cd ${DRIVERS_TOOLS}/.evergreen/csfle
+          . ./activate_venv.sh
+          # TODO: Stabilize this pip install with a non-forked version of PyKMIP in https://jira.mongodb.org/browse/GODRIVER-2239
+          pip install git+https://github.com/kevinAlbs/PyKMIP.git@expand_tls12_ciphers
+    - command: shell.exec
+      params:
+        background: true
+        script: |
+          cd ${DRIVERS_TOOLS}/.evergreen/csfle
+          ./kmstlsvenv/bin/python3 -u kms_kmip_server.py --port 5698
 
   run-kms-tls-test:
     - command: shell.exec
@@ -869,6 +917,35 @@ functions:
           PKG_CONFIG_PATH=$PKG_CONFIG_PATH \
           LD_LIBRARY_PATH=$LD_LIBRARY_PATH
 
+  run-kmip-tests:
+    - command: shell.exec
+      type: test
+      params:
+        working_dir: src/go.mongodb.org/mongo-driver
+        script: |
+          ${PREPARE_SHELL}
+          export KMS_MOCK_SERVERS_RUNNING="true"
+
+          export GOFLAGS=-mod=vendor
+          AUTH="${AUTH}" \
+          SSL="${SSL}" \
+          MONGODB_URI="${MONGODB_URI}" \
+          TOPOLOGY="${TOPOLOGY}" \
+          MONGO_GO_DRIVER_COMPRESSOR=${MONGO_GO_DRIVER_COMPRESSOR} \
+          BUILD_TAGS="-tags cse" \
+          AWS_ACCESS_KEY_ID="${cse_aws_access_key_id}" \
+          AWS_SECRET_ACCESS_KEY="${cse_aws_secret_access_key}" \
+          AZURE_TENANT_ID="${cse_azure_tenant_id}" \
+          AZURE_CLIENT_ID="${cse_azure_client_id}" \
+          AZURE_CLIENT_SECRET="${cse_azure_client_secret}" \
+          GCP_EMAIL="${cse_gcp_email}" \
+          GCP_PRIVATE_KEY="${cse_gcp_private_key}" \
+          CSFLE_TLS_CA_FILE="$DRIVERS_TOOLS/.evergreen/x509gen/ca.pem"
+          CSFLE_TLS_CERTIFICATE_KEY_FILE="$DRIVERS_TOOLS/.evergreen/x509gen/client.pem"
+          make evg-test-kmip \
+          PKG_CONFIG_PATH=$PKG_CONFIG_PATH \
+          LD_LIBRARY_PATH=$LD_LIBRARY_PATH
+
 pre:
   - func: fetch-source
   - func: prepare-resources
@@ -893,26 +970,13 @@ tasks:
         vars:
           targets: check-fmt
 
-  - name: sa-errcheck
-    tags: ["static-analysis"]
-    commands:
-      - func: run-make
-        vars:
-          targets: errcheck
-
   - name: sa-lint
     tags: ["static-analysis"]
     commands:
+      - func: install-linters
       - func: run-make
         vars:
           targets: lint
-
-  - name: sa-vet
-    tags: ["static-analysis"]
-    commands:
-      - func: run-make
-        vars:
-          targets: vet
 
   - name: perf
     tags: ["performance"]
@@ -1404,6 +1468,7 @@ tasks:
           TOPOLOGY: "sharded_cluster"
           AUTH: "noauth"
           SSL: "nossl"
+          LOAD_BALANCER: "true"
       - func: run-load-balancer
       - func: run-load-balancer-tests
 
@@ -1415,6 +1480,7 @@ tasks:
           TOPOLOGY: "sharded_cluster"
           AUTH: "auth"
           SSL: "ssl"
+          LOAD_BALANCER: "true"
       - func: run-load-balancer
       - func: run-load-balancer-tests
 
@@ -1611,14 +1677,6 @@ tasks:
         vars:
           MONGO_GO_DRIVER_COMPRESSOR: "snappy"
 
-  - name: go1.9-build
-    tags: ["compile-check"]
-    commands:
-      - func: run-make
-        vars:
-          targets: "build"
-          BUILD_ENV: "PATH=/opt/golang/go1.9/bin:$PATH GOROOT=/opt/golang/go1.9"
-
   - name: go1.10-build
     tags: ["compile-check"]
     commands:
@@ -1720,6 +1778,7 @@ tasks:
       - func: start-kms-mock-server
         vars:
           CERT_FILE: "expired.pem"
+          PORT: 8000
       - func: run-kms-tls-test
         vars:
           KMS_TLS_TESTCASE: "INVALID_CERT"
@@ -1738,9 +1797,37 @@ tasks:
       - func: start-kms-mock-server
         vars:
           CERT_FILE: "wrong-host.pem"
+          PORT: 8000
       - func: run-kms-tls-test
         vars:
           KMS_TLS_TESTCASE: "INVALID_HOSTNAME"
+          TOPOLOGY: "server"
+          AUTH: "noauth"
+          SSL: "nossl"
+
+  - name: "test-kms-kmip"
+    tags: ["kms-kmip"]
+    commands:
+      - func: bootstrap-mongo-orchestration
+        vars:
+          TOPOLOGY: "server"
+          AUTH: "noauth"
+          SSL: "nossl"
+      - func: start-kms-mock-server
+        vars:
+          CERT_FILE: "expired.pem"
+          PORT: 8000
+      - func: start-kms-mock-server
+        vars:
+          CERT_FILE: "wrong-host.pem"
+          PORT: 8001
+      - func: start-kms-mock-server-require-client-cert
+        vars:
+          CERT_FILE: "server.pem"
+          PORT: 8002
+      - func: start-kms-kmip-server
+      - func: run-kmip-tests
+        vars:
           TOPOLOGY: "server"
           AUTH: "noauth"
           SSL: "nossl"
@@ -1792,6 +1879,10 @@ axes:
         display_name: "2.6"
         variables:
           VERSION: "2.6"
+      - id: "rapid"
+        display_name: "rapid"
+        variables:
+          VERSION: "rapid"
       - id: "latest"
         display_name: "latest"
         variables:
@@ -2058,14 +2149,14 @@ buildvariants:
   - matrix_name: "ocsp-test"
     matrix_spec: { version: ["4.4", "5.0", "latest"], ocsp-rhel-70: ["rhel70-go-1-16"] }
     display_name: "OCSP ${version} ${ocsp-rhel-70}"
-    batchtime: 20160 # 14 days
+    batchtime: 20160 # Use a batchtime of 14 days as suggested by the OCSP test README
     tasks:
       - name: ".ocsp"
 
   - matrix_name: "ocsp-test-windows"
     matrix_spec: { version: ["4.4", "5.0", "latest"], os-ssl-40: ["windows-64-go-1-16"] }
     display_name: "OCSP ${version} ${os-ssl-40}"
-    batchtime: 20160 # 14 days
+    batchtime: 20160 # Use a batchtime of 14 days as suggested by the OCSP test README
     tasks:
       # Windows MongoDB servers do not staple OCSP responses and only support RSA.
       - name: ".ocsp-rsa !.ocsp-staple"
@@ -2073,7 +2164,7 @@ buildvariants:
   - matrix_name: "ocsp-test-macos"
     matrix_spec: { version: ["4.4", "5.0", "latest"], os-ssl-40: ["osx-go-1-16"] }
     display_name: "OCSP ${version} ${os-ssl-40}"
-    batchtime: 20160 # 14 days
+    batchtime: 20160 # Use a batchtime of 14 days as suggested by the OCSP test README
     tasks:
       # macos MongoDB servers do not staple OCSP responses and only support RSA.
       - name: ".ocsp-rsa !.ocsp-staple"
@@ -2092,7 +2183,10 @@ buildvariants:
 
   - matrix_name: "load-balancer-test"
     # The LB software is only available on Ubuntu 18.04, so we don't test on all OSes.
-    matrix_spec: { version: ["5.0", "latest"], os-ssl-40: ["ubuntu1804-64-go-1-16"] }
+    # The new "loadBalancerPort" option is supported starting with server 5.2, which responds
+    # correctly to "hello" commands with a service ID when behind a load balancer. Only run load
+    # balancer tests on server 5.2+ ("rapid", "latest" are always 5.2+).
+    matrix_spec: { version: ["rapid", "latest"], os-ssl-40: ["ubuntu1804-64-go-1-16"] }
     display_name: "Load Balancer Support ${version} ${os-ssl-40}"
     tasks:
       - name: ".load-balancer"
@@ -2102,3 +2196,9 @@ buildvariants:
     display_name: "Serverless ${os-ssl-40}"
     tasks:
       - "serverless_task_group"
+
+  - matrix_name: "kms-kmip-test"
+    matrix_spec: { version: ["latest"], os-ssl-40: ["ubuntu1804-64-go-1-16"] }
+    display_name: "KMS KMIP ${os-ssl-40}"
+    tasks:
+      - name: ".kms-kmip"

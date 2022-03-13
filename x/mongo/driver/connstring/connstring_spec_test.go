@@ -54,17 +54,15 @@ func (h *host) toString() string {
 	case "ip_literal":
 		if len(h.Port) == 0 {
 			return "[" + h.Host + "]"
-		} else {
-			return "[" + h.Host + "]" + ":" + string(h.Port)
 		}
+		return "[" + h.Host + "]" + ":" + string(h.Port)
 	case "ipv4":
 		fallthrough
 	case "hostname":
 		if len(h.Port) == 0 {
 			return h.Host
-		} else {
-			return h.Host + ":" + string(h.Port)
 		}
+		return h.Host + ":" + string(h.Port)
 	}
 
 	return ""
@@ -92,7 +90,7 @@ func runTestsInFile(t *testing.T, dirname string, filename string, warningsError
 	filename = filename[:len(filename)-5]
 
 	for _, testCase := range container.Tests {
-		runTest(t, filename, &testCase, warningsError)
+		runTest(t, filename, testCase, warningsError)
 	}
 }
 
@@ -107,8 +105,8 @@ var skipKeywords = []string{
 	"serverSelectionTryOnce",
 }
 
-func runTest(t *testing.T, filename string, test *testCase, warningsError bool) {
-	t.Run(test.Description, func(t *testing.T) {
+func runTest(t *testing.T, filename string, test testCase, warningsError bool) {
+	t.Run(filename+"/"+test.Description, func(t *testing.T) {
 		if _, skip := skipDescriptions[test.Description]; skip {
 			t.Skip()
 		}
@@ -121,7 +119,7 @@ func runTest(t *testing.T, filename string, test *testCase, warningsError bool) 
 		cs, err := connstring.ParseAndValidate(test.URI)
 		// Since we don't have warnings in Go, we return warnings as errors.
 		//
-		// This is a bit unfortuante, but since we do raise warnings as errors with the newer
+		// This is a bit unfortunate, but since we do raise warnings as errors with the newer
 		// URI options, but don't with some of the older things, we do a switch on the filename
 		// here. We are trying to not break existing user applications that have unrecognized
 		// options.

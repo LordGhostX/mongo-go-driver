@@ -1,9 +1,14 @@
+// Copyright (C) MongoDB, Inc. 2021-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package operation
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"runtime"
 	"strconv"
 
@@ -108,47 +113,6 @@ func (h *Hello) Result(addr address.Address) description.Server {
 	return description.NewServer(addr, bson.Raw(h.res))
 }
 
-func (h *Hello) decodeStringSlice(element bsoncore.Element, name string) ([]string, error) {
-	arr, ok := element.Value().ArrayOK()
-	if !ok {
-		return nil, fmt.Errorf("expected '%s' to be an array but it's a BSON %s", name, element.Value().Type)
-	}
-	vals, err := arr.Values()
-	if err != nil {
-		return nil, err
-	}
-	var strs []string
-	for _, val := range vals {
-		str, ok := val.StringValueOK()
-		if !ok {
-			return nil, fmt.Errorf("expected '%s' to be an array of strings, but found a BSON %s", name, val.Type)
-		}
-		strs = append(strs, str)
-	}
-	return strs, nil
-}
-
-func (h *Hello) decodeStringMap(element bsoncore.Element, name string) (map[string]string, error) {
-	doc, ok := element.Value().DocumentOK()
-	if !ok {
-		return nil, fmt.Errorf("expected '%s' to be a document but it's a BSON %s", name, element.Value().Type)
-	}
-	elements, err := doc.Elements()
-	if err != nil {
-		return nil, err
-	}
-	m := make(map[string]string)
-	for _, element := range elements {
-		key := element.Key()
-		value, ok := element.Value().StringValueOK()
-		if !ok {
-			return nil, fmt.Errorf("expected '%s' to be a document of strings, but found a BSON %s", name, element.Value().Type)
-		}
-		m[key] = value
-	}
-	return m, nil
-}
-
 // handshakeCommand appends all necessary command fields as well as client metadata, SASL supported mechs, and compression.
 func (h *Hello) handshakeCommand(dst []byte, desc description.SelectedServer) ([]byte, error) {
 	dst, err := h.command(dst, desc)
@@ -195,7 +159,9 @@ func (h *Hello) handshakeCommand(dst []byte, desc description.SelectedServer) ([
 
 // command appends all necessary command fields.
 func (h *Hello) command(dst []byte, desc description.SelectedServer) ([]byte, error) {
-	if h.serverAPI != nil || desc.Server.HelloOK {
+	// Use "hello" if topology is LoadBalanced, API version is declared or server
+	// has responded with "helloOk". Otherwise, use legacy hello.
+	if desc.Kind == description.LoadBalanced || h.serverAPI != nil || desc.Server.HelloOK {
 		dst = bsoncore.AppendInt32Element(dst, "hello", 1)
 	} else {
 		dst = bsoncore.AppendInt32Element(dst, internal.LegacyHello, 1)

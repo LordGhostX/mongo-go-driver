@@ -22,7 +22,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/pretty"
-	"go.mongodb.org/mongo-driver/bson/bsoncodec"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/internal/testutil/assert"
 )
@@ -60,12 +59,6 @@ type parseErrorTestCase struct {
 }
 
 const dataDir = "../data/bson-corpus/"
-
-var dvd bsoncodec.DefaultValueDecoders
-var dve bsoncodec.DefaultValueEncoders
-
-var dc = bsoncodec.DecodeContext{Registry: NewRegistryBuilder().Build()}
-var ec = bsoncodec.EncodeContext{Registry: NewRegistryBuilder().Build()}
 
 func findJSONFilesInDir(t *testing.T, dir string) []string {
 	files := make([]string, 0)
@@ -160,6 +153,7 @@ func normalizeCanonicalDouble(t *testing.T, key string, cEJ string) string {
 	// Parse the float contained by the map.
 	expectedString := cEJMap[key]["$numberDouble"]
 	expectedFloat, err := strconv.ParseFloat(expectedString, 64)
+	require.NoError(t, err)
 
 	// Normalize the string
 	return fmt.Sprintf(`{"%s":{"$numberDouble":"%s"}}`, key, formatDouble(expectedFloat))
@@ -356,6 +350,10 @@ func runTest(t *testing.T, file string) {
 					case "0x00", "0x05", "0x13":
 						var doc D
 						err := UnmarshalExtJSON([]byte(s), true, &doc)
+						// Null bytes are validated when marshaling to BSON
+						if strings.Contains(p.Description, "Null") {
+							_, err = Marshal(doc)
+						}
 						expectError(t, err, fmt.Sprintf("%s: expected parse error", p.Description))
 					default:
 						t.Errorf("Update test to check for parse errors for type %s", test.BsonType)

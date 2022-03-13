@@ -2527,6 +2527,94 @@ func AggregationExamples(t *testing.T, db *mongo.Database) {
 	}
 }
 
+// CausalConsistencyExamples contains examples of causal consistency usage.
+func CausalConsistencyExamples(client *mongo.Client) error {
+	ctx := context.Background()
+	coll := client.Database("test").Collection("items")
+
+	currentDate := time.Now()
+
+	err := coll.Drop(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Start Causal Consistency Example 1
+
+	// Use a causally-consistent session to run some operations
+	opts := options.Session().SetDefaultReadConcern(readconcern.Majority()).SetDefaultWriteConcern(
+		writeconcern.New(writeconcern.WMajority(), writeconcern.WTimeout(1000)))
+	session1, err := client.StartSession(opts)
+
+	if err != nil {
+		return err
+	}
+
+	err = client.UseSessionWithOptions(context.TODO(), opts, func(sctx mongo.SessionContext) error {
+		// Run an update with our causally-consistent session
+		_, err = coll.UpdateOne(sctx, bson.D{{"sku", 111}}, bson.D{{"$set", bson.D{{"end", currentDate}}}})
+		if err != nil {
+			return err
+		}
+
+		// Run an insert with our causally-consistent session
+		_, err = coll.InsertOne(sctx, bson.D{{"sku", "nuts-111"}, {"name", "Pecans"}, {"start", currentDate}})
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	// End Causal Consistency Example 1
+
+	// Start Causal Consistency Example 2
+
+	// Make a new session that is causally consistent with session1 so session2 reads what session1 writes
+	opts = options.Session().SetDefaultReadPreference(readpref.Secondary()).SetDefaultReadConcern(
+		readconcern.Majority()).SetDefaultWriteConcern(writeconcern.New(writeconcern.WMajority(),
+		writeconcern.WTimeout(1000)))
+	session2, err := client.StartSession(opts)
+
+	if err != nil {
+		return err
+	}
+
+	err = client.UseSessionWithOptions(context.TODO(), opts, func(sctx mongo.SessionContext) error {
+		// Set cluster time of session2 to session1's cluster time
+		clusterTime := session1.ClusterTime()
+		session2.AdvanceClusterTime(clusterTime)
+
+		// Set operation time of session2 to session1's operation time
+		operationTime := session1.OperationTime()
+		session2.AdvanceOperationTime(operationTime)
+		// Run a find on session2, which should find all the writes from session1
+		cursor, err := coll.Find(sctx, bson.D{{"end", nil}})
+
+		if err != nil {
+			return err
+		}
+
+		for cursor.Next(sctx) {
+			doc := cursor.Current
+			fmt.Printf("Document: %v\n", doc.String())
+		}
+
+		return cursor.Err()
+	})
+
+	if err != nil {
+		return err
+	}
+	// End Causal Consistency Example 2
+
+	return nil
+}
+
 // RunCommandExamples contains examples of RunCommand operations.
 func RunCommandExamples(t *testing.T, db *mongo.Database) {
 	ctx := context.Background()
@@ -2716,8 +2804,8 @@ func IndexExamples(t *testing.T, db *mongo.Database) {
 
 // Start Versioned API Example 1
 
-// VersionedAPIExample is an example of creating a client with versioned API.
-func VersionedAPIExample() {
+// StableAPIExample is an example of creating a client with stable API.
+func StableAPIExample() {
 	ctx := context.Background()
 	// For a replica set, include the replica set name and a seedlist of the members in the URI string; e.g.
 	// uri := "mongodb://mongodb0.example.com:27017,mongodb1.example.com:27017/?replicaSet=myRepl"
@@ -2738,8 +2826,8 @@ func VersionedAPIExample() {
 
 // Start Versioned API Example 2
 
-// VersionedAPIStrictExample is an example of creating a client with strict versioned API.
-func VersionedAPIStrictExample() {
+// StableAPIStrictExample is an example of creating a client with strict stable API.
+func StableAPIStrictExample() {
 	ctx := context.Background()
 	// For a replica set, include the replica set name and a seedlist of the members in the URI string; e.g.
 	// uri := "mongodb://mongodb0.example.com:27017,mongodb1.example.com:27017/?replicaSet=myRepl"
@@ -2760,8 +2848,8 @@ func VersionedAPIStrictExample() {
 
 // Start Versioned API Example 3
 
-// VersionedAPINonStrictExample is an example of creating a client with non-strict versioned API.
-func VersionedAPINonStrictExample() {
+// StableAPINonStrictExample is an example of creating a client with non-strict stable API.
+func StableAPINonStrictExample() {
 	ctx := context.Background()
 	// For a replica set, include the replica set name and a seedlist of the members in the URI string; e.g.
 	// uri := "mongodb://mongodb0.example.com:27017,mongodb1.example.com:27017/?replicaSet=myRepl"
@@ -2782,9 +2870,9 @@ func VersionedAPINonStrictExample() {
 
 // Start Versioned API Example 4
 
-// VersionedAPIDeprecationErrorsExample is an example of creating a client with versioned API
+// StableAPIDeprecationErrorsExample is an example of creating a client with stable API
 // with deprecation errors.
-func VersionedAPIDeprecationErrorsExample() {
+func StableAPIDeprecationErrorsExample() {
 	ctx := context.Background()
 	// For a replica set, include the replica set name and a seedlist of the members in the URI string; e.g.
 	// uri := "mongodb://mongodb0.example.com:27017,mongodb1.example.com:27017/?replicaSet=myRepl"
@@ -2803,9 +2891,9 @@ func VersionedAPIDeprecationErrorsExample() {
 
 // End Versioned API Example 4
 
-// VersionedAPIStrictCountExample is an example of using CountDocuments instead of a traditional count
-// with a strict API version since the count command does not belong to API version 1.
-func VersionedAPIStrictCountExample(t *testing.T) {
+// StableAPIStrictCountExample is an example of using CountDocuments instead of a traditional count
+// with a strict stable API since the count command does not belong to API version 1.
+func StableAPIStrictCountExample(t *testing.T) {
 	uri := "mongodb://localhost:27017"
 
 	serverAPIOptions := options.ServerAPI(options.ServerAPIVersion1).SetStrict(true)
@@ -2861,10 +2949,10 @@ func VersionedAPIStrictCountExample(t *testing.T) {
 	// End Versioned API Example 8
 }
 
-// VersionedAPIExamples runs all versioned API examples.
-func VersionedAPIExamples() {
-	VersionedAPIExample()
-	VersionedAPIStrictExample()
-	VersionedAPINonStrictExample()
-	VersionedAPIDeprecationErrorsExample()
+// StableAPIExamples runs all stable API examples.
+func StableAPIExamples() {
+	StableAPIExample()
+	StableAPIStrictExample()
+	StableAPINonStrictExample()
+	StableAPIDeprecationErrorsExample()
 }

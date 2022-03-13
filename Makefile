@@ -13,11 +13,12 @@ EXAMPLES_TEST_PKGS = $(shell etc/list_test_pkgs.sh ./examples)
 PKGS = $(BSON_PKGS) $(EVENT_PKGS) $(MONGO_PKGS) $(UNSTABLE_PKGS) $(TAG_PKG) $(EXAMPLES_PKGS)
 TEST_PKGS = $(BSON_TEST_PKGS) $(EVENT_TEST_PKGS) $(MONGO_TEST_PKGS) $(UNSTABLE_TEST_PKGS) $(TAG_PKG) $(EXAMPLES_TEST_PKGS)
 ATLAS_URIS = "$(ATLAS_FREE)" "$(ATLAS_REPLSET)" "$(ATLAS_SHARD)" "$(ATLAS_TLS11)" "$(ATLAS_TLS12)" "$(ATLAS_FREE_SRV)" "$(ATLAS_REPLSET_SRV)" "$(ATLAS_SHARD_SRV)" "$(ATLAS_TLS11_SRV)" "$(ATLAS_TLS12_SRV)" "$(ATLAS_SERVERLESS)" "$(ATLAS_SERVERLESS_SRV)"
+GODISTS=linux/amd64 linux/386 linux/arm64 linux/arm linux/s390x
 
 TEST_TIMEOUT = 1800
 
 .PHONY: default
-default: check-env check-fmt vet build-examples lint errcheck test-cover test-race
+default: check-env check-fmt build-examples lint test-cover test-race
 
 .PHONY: check-env
 check-env:
@@ -59,16 +60,13 @@ fmt:
 
 .PHONY: lint
 lint:
-	golint $(PKGS) | ./etc/lintscreen.pl .lint-allowlist
-
-.PHONY: lint-add-allowlist
-lint-add-allowlist:
-	golint $(PKGS) | ./etc/lintscreen.pl -u .lint-allowlist
-	sort .lint-allowlist -o .lint-allowlist
-
-.PHONY: errcheck
-errcheck:
-	errcheck -exclude .errcheck-excludes ./bson/... ./mongo/... ./x/...
+	for dist in $(GODISTS); do \
+		goos=$$(echo $$dist | cut -d/ -f 1) ; \
+		goarch=$$(echo $$dist | cut -d/ -f 2) ; \
+		command="GOOS=$$goos GOARCH=$$goarch golangci-lint run --config .golangci.yml ./..." ; \
+		echo $$command ; \
+		eval $$command ; \
+	done
 
 .PHONY: test
 test:
@@ -126,11 +124,6 @@ update-server-selection-tests:
 update-notices:
 	etc/generate-notices.pl > THIRD-PARTY-NOTICES
 
-.PHONY: vet
-vet:
-	go vet $(BUILD_TAGS) -cgocall=false -composites=false -unusedstringmethods="Error" $(PKGS)
-
-
 # Evergreen specific targets
 .PHONY: evg-test
 evg-test:
@@ -177,6 +170,14 @@ evg-test-load-balancers:
 .PHONY: evg-test-kms
 evg-test-kms:
 	go test -exec "env PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH)" $(BUILD_TAGS) -v -timeout $(TEST_TIMEOUT)s ./mongo/integration -run TestClientSideEncryptionProse/kms_tls_tests >> test.suite
+
+.PHONY: evg-test-kmip
+evg-test-kmip:
+	go test -exec "env PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH)" $(BUILD_TAGS) -v -timeout $(TEST_TIMEOUT)s ./mongo/integration -run TestClientSideEncryptionSpec/kmipKMS >> test.suite
+	go test -exec "env PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH)" $(BUILD_TAGS) -v -timeout $(TEST_TIMEOUT)s ./mongo/integration -run TestClientSideEncryptionProse/data_key_and_double_encryption >> test.suite
+	go test -exec "env PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH)" $(BUILD_TAGS) -v -timeout $(TEST_TIMEOUT)s ./mongo/integration -run TestClientSideEncryptionProse/corpus >> test.suite
+	go test -exec "env PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH)" $(BUILD_TAGS) -v -timeout $(TEST_TIMEOUT)s ./mongo/integration -run TestClientSideEncryptionProse/custom_endpoint >> test.suite
+	go test -exec "env PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) LD_LIBRARY_PATH=$(LD_LIBRARY_PATH)" $(BUILD_TAGS) -v -timeout $(TEST_TIMEOUT)s ./mongo/integration -run TestClientSideEncryptionProse/kms_tls_options_test >> test.suite
 
 .PHONY: evg-test-serverless
 evg-test-serverless:

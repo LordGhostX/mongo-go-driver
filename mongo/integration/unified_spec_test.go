@@ -7,6 +7,7 @@
 package integration
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -247,9 +248,9 @@ func runSpecTestCase(mt *mtest.T, test *testCase, testFile testFile) {
 
 		// work around for SERVER-39704: run a non-transactional distinct against each shard in a sharded cluster
 		if mtest.ClusterTopologyKind() == mtest.Sharded && test.Description == "distinct" {
-			err := runCommandOnAllServers(mt, func(mongosClient *mongo.Client) error {
+			err := runCommandOnAllServers(func(mongosClient *mongo.Client) error {
 				coll := mongosClient.Database(mt.DB.Name()).Collection(mt.Coll.Name())
-				_, err := coll.Distinct(mtest.Background, "x", bson.D{})
+				_, err := coll.Distinct(context.Background(), "x", bson.D{})
 				return err
 			})
 			assert.Nil(mt, err, "error running distinct against all mongoses: %v", err)
@@ -272,6 +273,7 @@ func runSpecTestCase(mt *mtest.T, test *testCase, testFile testFile) {
 		testClientOpts.SetPoolMonitor(&event.PoolMonitor{
 			Event: test.monitor.handlePoolEvent,
 		})
+		testClientOpts.SetServerMonitor(test.monitor.sdamMonitor)
 		if testClientOpts.HeartbeatInterval == nil {
 			// If one isn't specified in the test, use a low heartbeat frequency so the Client will quickly recover when
 			// using failpoints that cause SDAM state changes.
@@ -288,8 +290,8 @@ func runSpecTestCase(mt *mtest.T, test *testCase, testFile testFile) {
 		sess0, sess1 := setupSessions(mt, test)
 		if sess0 != nil {
 			defer func() {
-				sess0.EndSession(mtest.Background)
-				sess1.EndSession(mtest.Background)
+				sess0.EndSession(context.Background())
+				sess1.EndSession(context.Background())
 			}()
 		}
 
@@ -302,8 +304,8 @@ func runSpecTestCase(mt *mtest.T, test *testCase, testFile testFile) {
 
 		// Needs to be done here (in spite of defer) because some tests
 		// require end session to be called before we check expectation
-		sess0.EndSession(mtest.Background)
-		sess1.EndSession(mtest.Background)
+		sess0.EndSession(context.Background())
+		sess1.EndSession(context.Background())
 		mt.ClearFailPoints()
 
 		checkExpectations(mt, test.Expectations, sess0.ID(), sess1.ID())
@@ -432,13 +434,13 @@ func executeTestRunnerOperation(mt *mtest.T, testCase *testCase, op *operation, 
 		targetHost := clientSession.PinnedServer.Addr.String()
 		opts := options.Client().ApplyURI(mtest.ClusterURI()).SetHosts([]string{targetHost})
 		testutil.AddTestServerAPIVersion(opts)
-		client, err := mongo.Connect(mtest.Background, opts)
+		client, err := mongo.Connect(context.Background(), opts)
 		if err != nil {
 			return fmt.Errorf("Connect error for targeted client: %v", err)
 		}
-		defer func() { _ = client.Disconnect(mtest.Background) }()
+		defer func() { _ = client.Disconnect(context.Background()) }()
 
-		if err = client.Database("admin").RunCommand(mtest.Background, fp).Err(); err != nil {
+		if err = client.Database("admin").RunCommand(context.Background(), fp).Err(); err != nil {
 			return fmt.Errorf("error setting targeted fail point: %v", err)
 		}
 		mt.TrackFailPoint(fp.ConfigureFailPoint)
@@ -486,13 +488,13 @@ func executeTestRunnerOperation(mt *mtest.T, testCase *testCase, op *operation, 
 			return fmt.Errorf("expected last two lsids to be not equal but both were %v", first)
 		}
 	case "assertCollectionExists":
-		return verifyCollectionState(mt, op, true)
+		return verifyCollectionState(op, true)
 	case "assertCollectionNotExists":
-		return verifyCollectionState(mt, op, false)
+		return verifyCollectionState(op, false)
 	case "assertIndexExists":
-		return verifyIndexState(mt, op, true)
+		return verifyIndexState(op, true)
 	case "assertIndexNotExists":
-		return verifyIndexState(mt, op, false)
+		return verifyIndexState(op, false)
 	case "wait":
 		time.Sleep(convertValueToMilliseconds(mt, op.Arguments.Lookup("ms")))
 	case "waitForEvent":
@@ -528,12 +530,12 @@ func verifyDirtySessionState(clientSession *session.Client, expectedDirty bool) 
 	return nil
 }
 
-func verifyIndexState(mt *mtest.T, op *operation, shouldExist bool) error {
+func verifyIndexState(op *operation, shouldExist bool) error {
 	db := op.Arguments.Lookup("database").StringValue()
 	coll := op.Arguments.Lookup("collection").StringValue()
 	index := op.Arguments.Lookup("index").StringValue()
 
-	exists, err := indexExists(mt, db, coll, index)
+	exists, err := indexExists(db, coll, index)
 	if err != nil {
 		return err
 	}
@@ -544,16 +546,16 @@ func verifyIndexState(mt *mtest.T, op *operation, shouldExist bool) error {
 	return nil
 }
 
-func indexExists(mt *mtest.T, dbName, collName, indexName string) (bool, error) {
+func indexExists(dbName, collName, indexName string) (bool, error) {
 	// Use global client because listIndexes cannot be executed inside a transaction.
 	iv := mtest.GlobalClient().Database(dbName).Collection(collName).Indexes()
-	cursor, err := iv.List(mtest.Background)
+	cursor, err := iv.List(context.Background())
 	if err != nil {
 		return false, fmt.Errorf("IndexView.List error: %v", err)
 	}
-	defer cursor.Close(mtest.Background)
+	defer cursor.Close(context.Background())
 
-	for cursor.Next(mtest.Background) {
+	for cursor.Next(context.Background()) {
 		if cursor.Current.Lookup("name").StringValue() == indexName {
 			return true, nil
 		}
@@ -561,11 +563,11 @@ func indexExists(mt *mtest.T, dbName, collName, indexName string) (bool, error) 
 	return false, cursor.Err()
 }
 
-func verifyCollectionState(mt *mtest.T, op *operation, shouldExist bool) error {
+func verifyCollectionState(op *operation, shouldExist bool) error {
 	db := op.Arguments.Lookup("database").StringValue()
 	coll := op.Arguments.Lookup("collection").StringValue()
 
-	exists, err := collectionExists(mt, db, coll)
+	exists, err := collectionExists(db, coll)
 	if err != nil {
 		return err
 	}
@@ -576,13 +578,13 @@ func verifyCollectionState(mt *mtest.T, op *operation, shouldExist bool) error {
 	return nil
 }
 
-func collectionExists(mt *mtest.T, dbName, collName string) (bool, error) {
+func collectionExists(dbName, collName string) (bool, error) {
 	filter := bson.D{
 		{"name", collName},
 	}
 
 	// Use global client because listCollections cannot be executed inside a transaction.
-	collections, err := mtest.GlobalClient().Database(dbName).ListCollectionNames(mtest.Background, filter)
+	collections, err := mtest.GlobalClient().Database(dbName).ListCollectionNames(context.Background(), filter)
 	if err != nil {
 		return false, fmt.Errorf("ListCollectionNames error: %v", err)
 	}
@@ -608,13 +610,13 @@ func executeSessionOperation(mt *mtest.T, op *operation, sess mongo.Session) err
 		}
 		return sess.StartTransaction(txnOpts)
 	case "commitTransaction":
-		return sess.CommitTransaction(mtest.Background)
+		return sess.CommitTransaction(context.Background())
 	case "abortTransaction":
-		return sess.AbortTransaction(mtest.Background)
+		return sess.AbortTransaction(context.Background())
 	case "withTransaction":
 		return executeWithTransaction(mt, sess, op.Arguments)
 	case "endSession":
-		sess.EndSession(mtest.Background)
+		sess.EndSession(context.Background())
 		return nil
 	default:
 		mt.Fatalf("unrecognized session operation: %v", op.Name)
@@ -653,7 +655,7 @@ func executeCollectionOperation(mt *mtest.T, op *operation, sess mongo.Session) 
 		cursor, err := executeFind(mt, sess, op.Arguments)
 		if op.opError == nil && err == nil {
 			verifyCursorResult(mt, cursor, op.Result)
-			_ = cursor.Close(mtest.Background)
+			_ = cursor.Close(context.Background())
 		}
 		return err
 	case "findOneAndDelete":
@@ -708,7 +710,7 @@ func executeCollectionOperation(mt *mtest.T, op *operation, sess mongo.Session) 
 		cursor, err := executeAggregate(mt, mt.Coll, sess, op.Arguments)
 		if op.opError == nil && err == nil {
 			verifyCursorResult(mt, cursor, op.Result)
-			_ = cursor.Close(mtest.Background)
+			_ = cursor.Close(context.Background())
 		}
 		return err
 	case "bulkWrite":
@@ -733,14 +735,14 @@ func executeCollectionOperation(mt *mtest.T, op *operation, sess mongo.Session) 
 		cursor, err := executeListIndexes(mt, sess, op.Arguments)
 		if op.opError == nil && err == nil {
 			verifyCursorResult(mt, cursor, op.Result)
-			_ = cursor.Close(mtest.Background)
+			_ = cursor.Close(context.Background())
 		}
 		return err
 	case "watch":
 		stream, err := executeWatch(mt, mt.Coll, sess, op.Arguments)
 		if op.opError == nil && err == nil {
 			assert.Nil(mt, op.Result, "unexpected result for watch: %v", op.Result)
-			_ = stream.Close(mtest.Background)
+			_ = stream.Close(context.Background())
 		}
 		return err
 	case "createIndex":
@@ -778,14 +780,14 @@ func executeDatabaseOperation(mt *mtest.T, op *operation, sess mongo.Session) er
 		cursor, err := executeAggregate(mt, mt.DB, sess, op.Arguments)
 		if op.opError == nil && err == nil {
 			verifyCursorResult(mt, cursor, op.Result)
-			_ = cursor.Close(mtest.Background)
+			_ = cursor.Close(context.Background())
 		}
 		return err
 	case "listCollections":
 		cursor, err := executeListCollections(mt, sess, op.Arguments)
 		if op.opError == nil && err == nil {
 			assert.Nil(mt, op.Result, "unexpected result for listCollections: %v", op.Result)
-			_ = cursor.Close(mtest.Background)
+			_ = cursor.Close(context.Background())
 		}
 		return err
 	case "listCollectionNames":
@@ -798,7 +800,7 @@ func executeDatabaseOperation(mt *mtest.T, op *operation, sess mongo.Session) er
 		stream, err := executeWatch(mt, mt.DB, sess, op.Arguments)
 		if op.opError == nil && err == nil {
 			assert.Nil(mt, op.Result, "unexpected result for watch: %v", op.Result)
-			_ = stream.Close(mtest.Background)
+			_ = stream.Close(context.Background())
 		}
 		return err
 	case "dropCollection":
@@ -839,7 +841,7 @@ func executeClientOperation(mt *mtest.T, op *operation, sess mongo.Session) erro
 		stream, err := executeWatch(mt, mt.Client, sess, op.Arguments)
 		if op.opError == nil && err == nil {
 			assert.Nil(mt, op.Result, "unexpected result for watch: %v", op.Result)
-			_ = stream.Close(mtest.Background)
+			_ = stream.Close(context.Background())
 		}
 		return err
 	case "listDatabaseObjects":
@@ -877,7 +879,7 @@ func insertDocuments(mt *mtest.T, coll *mongo.Collection, rawDocs []bson.Raw) {
 		return
 	}
 
-	_, err := coll.InsertMany(mtest.Background, docsToInsert)
+	_, err := coll.InsertMany(context.Background(), docsToInsert)
 	assert.Nil(mt, err, "InsertMany error for collection %v: %v", coll.Name(), err)
 }
 
@@ -936,7 +938,7 @@ func verifyTestOutcome(mt *mtest.T, outcomeColl *outcomeCollection) {
 
 	findOpts := options.Find().
 		SetSort(bson.M{"_id": 1})
-	cursor, err := coll.Find(mtest.Background, bson.D{}, findOpts)
+	cursor, err := coll.Find(context.Background(), bson.D{}, findOpts)
 	assert.Nil(mt, err, "Find error: %v", err)
 	verifyCursorResult(mt, cursor, outcomeColl.Data)
 }

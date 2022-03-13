@@ -4,6 +4,7 @@
 // not use this file except in compliance with the License. You may obtain
 // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
+//go:build go1.13
 // +build go1.13
 
 package integration
@@ -47,46 +48,7 @@ func TestSDAMErrorHandling(t *testing.T) {
 	// blockConnection and appName.
 	mt.RunOpts("before handshake completes", baseMtOpts().Auth(true).MinServerVersion("4.4"), func(mt *mtest.T) {
 		mt.RunOpts("network errors", noClientOpts, func(mt *mtest.T) {
-			mt.Run("pool not cleared on operation-scoped network timeout", func(mt *mtest.T) {
-				// Assert that the pool is not cleared when a connection created by an application
-				// operation thread encounters an operation timeout during handshaking. Unlike the
-				// non-timeout test below, we only test connections created in the foreground for
-				// timeouts because connections created by the pool maintenance routine can't be
-				// timed out using a context.
-
-				appName := "authOperationTimeoutTest"
-				// Set failpoint on saslContinue instead of saslStart because saslStart isn't done when using
-				// speculative auth.
-				mt.SetFailPoint(mtest.FailPoint{
-					ConfigureFailPoint: "failCommand",
-					Mode: mtest.FailPointMode{
-						Times: 1,
-					},
-					Data: mtest.FailPointData{
-						FailCommands:    []string{"saslContinue"},
-						BlockConnection: true,
-						BlockTimeMS:     150,
-						AppName:         appName,
-					},
-				})
-
-				// Reset the client with the appName specified in the failpoint and the pool monitor.
-				tpm := newTestPoolMonitor()
-				mt.ResetClient(baseClientOpts().SetAppName(appName).SetPoolMonitor(tpm.PoolMonitor))
-
-				// Use a context with a 100ms timeout so that the saslContinue delay of 150ms causes
-				// an operation-scoped context timeout (i.e. a timeout not caused by a client timeout
-				// like connectTimeoutMS or socketTimeoutMS).
-				timeoutCtx, cancel := context.WithTimeout(mtest.Background, 100*time.Millisecond)
-				defer cancel()
-				_, err := mt.Coll.InsertOne(timeoutCtx, bson.D{{"test", 1}})
-				assert.NotNil(mt, err, "expected InsertOne error, got nil")
-				assert.True(mt, mongo.IsTimeout(err), "expected timeout error, got %v", err)
-				assert.True(mt, mongo.IsNetworkError(err), "expected network error, got %v", err)
-				assert.False(mt, tpm.IsPoolCleared(), "expected pool not to be cleared but was cleared")
-			})
-
-			mt.Run("pool cleared on non-operation-scoped network timeout", func(mt *mtest.T) {
+			mt.Run("pool cleared on network timeout", func(mt *mtest.T) {
 				// Assert that the pool is cleared when a connection created by an application
 				// operation thread encounters a timeout caused by connectTimeoutMS during
 				// handshaking.
@@ -177,7 +139,7 @@ func TestSDAMErrorHandling(t *testing.T) {
 					tpm := newTestPoolMonitor()
 					mt.ResetClient(baseClientOpts().SetAppName(appName).SetPoolMonitor(tpm.PoolMonitor))
 
-					_, err := mt.Coll.InsertOne(mtest.Background, bson.D{{"x", 1}})
+					_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"x", 1}})
 					assert.NotNil(mt, err, "expected InsertOne error, got nil")
 					assert.False(mt, mongo.IsTimeout(err), "expected non-timeout error, got %v", err)
 					assert.True(mt, tpm.IsPoolCleared(), "expected pool to be cleared but was not")
@@ -206,7 +168,7 @@ func TestSDAMErrorHandling(t *testing.T) {
 				tpm := newTestPoolMonitor()
 				mt.ResetClient(baseClientOpts().SetAppName(appName).SetPoolMonitor(tpm.PoolMonitor))
 
-				_, err := mt.Coll.InsertOne(mtest.Background, bson.D{{"test", 1}})
+				_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"test", 1}})
 				assert.NotNil(mt, err, "expected InsertOne error, got nil")
 				assert.False(mt, mongo.IsTimeout(err), "expected non-timeout error, got %v", err)
 				assert.True(mt, tpm.IsPoolCleared(), "expected pool to be cleared but was not")
@@ -215,13 +177,13 @@ func TestSDAMErrorHandling(t *testing.T) {
 				tpm := newTestPoolMonitor()
 				mt.ResetClient(baseClientOpts().SetPoolMonitor(tpm.PoolMonitor))
 
-				_, err := mt.Coll.InsertOne(mtest.Background, bson.D{{"x", 1}})
+				_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"x", 1}})
 				assert.Nil(mt, err, "InsertOne error: %v", err)
 
 				filter := bson.M{
 					"$where": "function() { sleep(1000); return false; }",
 				}
-				timeoutCtx, cancel := context.WithTimeout(mtest.Background, 100*time.Millisecond)
+				timeoutCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 				defer cancel()
 				_, err = mt.Coll.Find(timeoutCtx, filter)
 				assert.NotNil(mt, err, "expected Find error, got %v", err)
@@ -232,10 +194,10 @@ func TestSDAMErrorHandling(t *testing.T) {
 				tpm := newTestPoolMonitor()
 				mt.ResetClient(baseClientOpts().SetPoolMonitor(tpm.PoolMonitor))
 
-				_, err := mt.Coll.InsertOne(mtest.Background, bson.D{{"x", 1}})
+				_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"x", 1}})
 				assert.Nil(mt, err, "InsertOne error: %v", err)
 
-				findCtx, cancel := context.WithCancel(mtest.Background)
+				findCtx, cancel := context.WithCancel(context.Background())
 				go func() {
 					time.Sleep(100 * time.Millisecond)
 					cancel()
@@ -339,7 +301,7 @@ func TestSDAMErrorHandling(t *testing.T) {
 func runServerErrorsTest(mt *mtest.T, isShutdownError bool, tpm *testPoolMonitor) {
 	mt.Helper()
 
-	_, err := mt.Coll.InsertOne(mtest.Background, bson.D{{"x", 1}})
+	_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"x", 1}})
 	assert.NotNil(mt, err, "expected InsertOne error, got nil")
 
 	// The pool should always be cleared for shutdown errors, regardless of server version.

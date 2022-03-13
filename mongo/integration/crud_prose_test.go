@@ -10,16 +10,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/bsontype"
 	"go.mongodb.org/mongo-driver/internal/testutil/assert"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )
 
@@ -47,7 +44,7 @@ func TestWriteErrorsWithLabels(t *testing.T) {
 			},
 		})
 
-		_, err := mt.Coll.InsertMany(mtest.Background,
+		_, err := mt.Coll.InsertMany(context.Background(),
 			[]interface{}{
 				bson.D{
 					{"a", 1},
@@ -78,7 +75,7 @@ func TestWriteErrorsWithLabels(t *testing.T) {
 			},
 		})
 
-		_, err := mt.Coll.DeleteMany(mtest.Background, bson.D{{"a", 1}})
+		_, err := mt.Coll.DeleteMany(context.Background(), bson.D{{"a", 1}})
 		assert.NotNil(mt, err, "expected non-nil error, got nil")
 
 		we, ok := err.(mongo.WriteException)
@@ -105,7 +102,7 @@ func TestWriteErrorsWithLabels(t *testing.T) {
 			&mongo.InsertOneModel{bson.D{{"a", 2}}},
 			&mongo.DeleteOneModel{bson.D{{"a", 2}}, nil, nil},
 		}
-		_, err := mt.Coll.BulkWrite(mtest.Background, models)
+		_, err := mt.Coll.BulkWrite(context.Background(), models)
 		assert.NotNil(mt, err, "expected non-nil error, got nil")
 
 		we, ok := err.(mongo.BulkWriteException)
@@ -302,7 +299,7 @@ func TestHintErrors(t *testing.T) {
 	expected := errors.New("the 'hint' command parameter requires a minimum server wire version of 5")
 	mt.Run("UpdateMany", func(mt *mtest.T) {
 
-		_, got := mt.Coll.UpdateMany(mtest.Background, bson.D{{"a", 1}}, bson.D{{"$inc", bson.D{{"a", 1}}}},
+		_, got := mt.Coll.UpdateMany(context.Background(), bson.D{{"a", 1}}, bson.D{{"$inc", bson.D{{"a", 1}}}},
 			options.Update().SetHint("_id_"))
 		assert.NotNil(mt, got, "expected non-nil error, got nil")
 		assert.Equal(mt, got, expected, "expected: %v got: %v", expected, got)
@@ -310,7 +307,7 @@ func TestHintErrors(t *testing.T) {
 
 	mt.Run("ReplaceOne", func(mt *mtest.T) {
 
-		_, got := mt.Coll.ReplaceOne(mtest.Background, bson.D{{"a", 1}}, bson.D{{"a", 2}},
+		_, got := mt.Coll.ReplaceOne(context.Background(), bson.D{{"a", 1}}, bson.D{{"a", 2}},
 			options.Replace().SetHint("_id_"))
 		assert.NotNil(mt, got, "expected non-nil error, got nil")
 		assert.Equal(mt, got, expected, "expected: %v got: %v", expected, got)
@@ -321,91 +318,9 @@ func TestHintErrors(t *testing.T) {
 			&mongo.InsertOneModel{bson.D{{"_id", 2}}},
 			&mongo.ReplaceOneModel{Filter: bson.D{{"_id", 2}}, Replacement: bson.D{{"a", 2}}, Hint: "_id_"},
 		}
-		_, got := mt.Coll.BulkWrite(mtest.Background, models)
+		_, got := mt.Coll.BulkWrite(context.Background(), models)
 		assert.NotNil(mt, got, "expected non-nil error, got nil")
 		assert.Equal(mt, got, expected, "expected: %v got: %v", expected, got)
-	})
-}
-
-type testValueMarshaler struct {
-	val []bson.D
-}
-
-func (tvm testValueMarshaler) MarshalBSONValue() (bsontype.Type, []byte, error) {
-	return bson.MarshalValue(tvm.val)
-}
-
-func TestAggregatePrimaryPreferredReadPreference(t *testing.T) {
-	primaryPrefClientOpts := options.Client().
-		SetWriteConcern(mtest.MajorityWc).
-		SetReadPreference(readpref.PrimaryPreferred()).
-		SetReadConcern(mtest.MajorityRc)
-	mtOpts := mtest.NewOptions().
-		ClientOptions(primaryPrefClientOpts).
-		MinServerVersion("4.1.0") // Consistent with tests in aggregate-out-readConcern.json
-
-	mt := mtest.New(t, mtOpts)
-	mt.Run("aggregate $out with non-primary read preference", func(mt *mtest.T) {
-		// DRIVERS-1836 $out is not allowed on serverless instances.
-		if os.Getenv("SERVERLESS") == "serverless" {
-			mt.Skip("test forbids serverless")
-		}
-
-		doc, err := bson.Marshal(bson.D{
-			{"_id", 1},
-			{"x", 11},
-		})
-		assert.Nil(mt, err, "Marshal error: %v", err)
-		outputCollName := "aggregate-read-pref-primary-preferred-output"
-		testCases := []struct {
-			name     string
-			pipeline interface{}
-		}{
-			{
-				"pipeline",
-				mongo.Pipeline{bson.D{{"$out", outputCollName}}},
-			},
-			{
-				"doc slice",
-				[]bson.D{{{"$out", outputCollName}}},
-			},
-			{
-				"bson a",
-				bson.A{bson.D{{"$out", outputCollName}}},
-			},
-			{
-				"valueMarshaler",
-				testValueMarshaler{[]bson.D{{{"$out", outputCollName}}}},
-			},
-		}
-		for _, tc := range testCases {
-			mt.Run(tc.name, func(mt *mtest.T) {
-				_, err = mt.Coll.InsertOne(mtest.Background, doc)
-				assert.Nil(mt, err, "InsertOne error: %v", err)
-
-				mt.ClearEvents()
-
-				cursor, err := mt.Coll.Aggregate(mtest.Background, tc.pipeline)
-				assert.Nil(mt, err, "Aggregate error: %v", err)
-				_ = cursor.Close(mtest.Background)
-
-				// Assert that the output collection contains the document we expect.
-				outputColl := mt.CreateCollection(mtest.Collection{Name: outputCollName}, false)
-				cursor, err = outputColl.Find(mtest.Background, bson.D{})
-				assert.Nil(mt, err, "Find error: %v", err)
-				defer cursor.Close(mtest.Background)
-
-				assert.True(mt, cursor.Next(mtest.Background), "expected Next to return true, got false")
-				assert.True(mt, bytes.Equal(doc, cursor.Current), "expected document %s, got %s", bson.Raw(doc), cursor.Current)
-				assert.False(mt, cursor.Next(mtest.Background), "unexpected document returned by Find: %s", cursor.Current)
-
-				// Assert that no read preference was sent to the server.
-				evt := mt.GetStartedEvent()
-				assert.Equal(mt, "aggregate", evt.CommandName, "expected command 'aggregate', got '%s'", evt.CommandName)
-				_, err = evt.Command.LookupErr("$readPreference")
-				assert.NotNil(mt, err, "expected command %s to not contain $readPreference", evt.Command)
-			})
-		}
 	})
 }
 
@@ -440,7 +355,7 @@ func TestWriteConcernError(t *testing.T) {
 		}
 		mt.SetFailPoint(fp)
 
-		_, err := mt.Coll.InsertOne(mtest.Background, bson.D{{"x", 1}})
+		_, err := mt.Coll.InsertOne(context.Background(), bson.D{{"x", 1}})
 		assert.NotNil(mt, err, "expected InsertOne error, got nil")
 		writeException, ok := err.(mongo.WriteException)
 		assert.True(mt, ok, "expected WriteException, got error %v of type %T", err, err)
@@ -467,7 +382,7 @@ func TestErrorsCodeNamePropagated(t *testing.T) {
 			{"insert", mt.Coll.Name()},
 			{"documents", []bson.D{}},
 		}
-		err := mt.DB.RunCommand(mtest.Background, cmd).Err()
+		err := mt.DB.RunCommand(context.Background(), cmd).Err()
 		assert.NotNil(mt, err, "expected RunCommand error, got nil")
 
 		ce, ok := err.(mongo.CommandError)
@@ -483,7 +398,7 @@ func TestErrorsCodeNamePropagated(t *testing.T) {
 	mt.RunOpts("write concern error", wcMtOpts, func(mt *mtest.T) {
 		// codeName is propagated for write concern errors.
 
-		_, err := mt.Coll.InsertOne(mtest.Background, bson.D{})
+		_, err := mt.Coll.InsertOne(context.Background(), bson.D{})
 		assert.NotNil(mt, err, "expected InsertOne error, got nil")
 
 		we, ok := err.(mongo.WriteException)

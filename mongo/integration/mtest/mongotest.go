@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -25,8 +26,6 @@ import (
 )
 
 var (
-	// Background is a no-op context.
-	Background = context.Background()
 	// MajorityWc is the majority write concern.
 	MajorityWc = writeconcern.New(writeconcern.WMajority())
 	// PrimaryRp is the primary read preference.
@@ -83,6 +82,12 @@ type WriteConcernErrorData struct {
 
 // T is a wrapper around testing.T.
 type T struct {
+	// connsCheckedOut is the net number of connections checked out during test execution.
+	// It must be accessed using the atomic package and should be at the beginning of the struct.
+	// - atomic bug: https://pkg.go.dev/sync/atomic#pkg-note-BUG
+	// - suggested layout: https://go101.org/article/memory-layout.html
+	connsCheckedOut int64
+
 	*testing.T
 
 	// members for only this T instance
@@ -103,7 +108,6 @@ type T struct {
 	dataLake          *bool
 	ssl               *bool
 	collCreateOpts    bson.D
-	connsCheckedOut   int // net number of connections checked out during test execution
 	requireAPIVersion *bool
 
 	// options copied to sub-tests
@@ -184,7 +188,7 @@ func (t *T) Close() {
 
 	// always disconnect the client regardless of clientType because Client.Disconnect will work against
 	// all deployments
-	_ = t.Client.Disconnect(Background)
+	_ = t.Client.Disconnect(context.Background())
 }
 
 // Run creates a new T instance for a sub-test and runs the given callback. It also creates a new collection using the
@@ -231,7 +235,7 @@ func (t *T) RunOpts(name string, opts *Options, callback func(*T)) {
 			// store number of sessions and connections checked out here but assert that they're equal to 0 after
 			// cleaning up test resources to make sure resources are always cleared
 			sessions := sub.Client.NumberSessionsInProgress()
-			conns := sub.connsCheckedOut
+			conns := sub.NumberConnectionsCheckedOut()
 
 			if sub.clientType != Mock {
 				sub.ClearFailPoints()
@@ -239,7 +243,7 @@ func (t *T) RunOpts(name string, opts *Options, callback func(*T)) {
 			}
 			// only disconnect client if it's not being shared
 			if sub.shareClient == nil || !*sub.shareClient {
-				_ = sub.Client.Disconnect(Background)
+				_ = sub.Client.Disconnect(context.Background())
 			}
 			assert.Equal(sub, 0, sessions, "%v sessions checked out", sessions)
 			assert.Equal(sub, 0, conns, "%v connections checked out", conns)
@@ -369,7 +373,7 @@ func (t *T) GetProxiedMessages() []*ProxyMessage {
 
 // NumberConnectionsCheckedOut returns the number of connections checked out from the test Client.
 func (t *T) NumberConnectionsCheckedOut() int {
-	return t.connsCheckedOut
+	return int(atomic.LoadInt64(&t.connsCheckedOut))
 }
 
 // ClearEvents clears the existing command monitoring events.
@@ -388,7 +392,7 @@ func (t *T) ResetClient(opts *options.ClientOptions) {
 		t.clientOpts = opts
 	}
 
-	_ = t.Client.Disconnect(Background)
+	_ = t.Client.Disconnect(context.Background())
 	t.createTestClient()
 	t.DB = t.Client.Database(t.dbName)
 	t.Coll = t.DB.Collection(t.collName, t.collOpts)
@@ -440,7 +444,7 @@ func (t *T) CreateCollection(coll Collection, createOnServer bool) *mongo.Collec
 		cmd := bson.D{{"create", coll.Name}}
 		cmd = append(cmd, coll.CreateOpts...)
 
-		if err := db.RunCommand(Background, cmd).Err(); err != nil {
+		if err := db.RunCommand(context.Background(), cmd).Err(); err != nil {
 			// ignore NamespaceExists errors for idempotency
 
 			cmdErr, ok := err.(mongo.CommandError)
@@ -460,7 +464,7 @@ func (t *T) ClearCollections() {
 	// Collections should not be dropped when testing against Atlas Data Lake because the data is pre-inserted.
 	if !testContext.dataLake {
 		for _, coll := range t.createdColls {
-			_ = coll.created.Drop(Background)
+			_ = coll.created.Drop(context.Background())
 		}
 	}
 	t.createdColls = t.createdColls[:0]
@@ -521,7 +525,7 @@ func (t *T) ClearFailPoints() {
 			{"configureFailPoint", fp},
 			{"mode", "off"},
 		}
-		err := db.RunCommand(Background, cmd).Err()
+		err := db.RunCommand(context.Background(), cmd).Err()
 		if err != nil {
 			t.Fatalf("error clearing fail point %s: %v", fp, err)
 		}
@@ -594,9 +598,9 @@ func (t *T) createTestClient() {
 
 				switch evt.Type {
 				case event.GetSucceeded:
-					t.connsCheckedOut++
+					atomic.AddInt64(&t.connsCheckedOut, 1)
 				case event.ConnectionReturned:
-					t.connsCheckedOut--
+					atomic.AddInt64(&t.connsCheckedOut, -1)
 				}
 			},
 		})
@@ -637,7 +641,7 @@ func (t *T) createTestClient() {
 	if err != nil {
 		t.Fatalf("error creating client: %v", err)
 	}
-	if err := t.Client.Connect(Background); err != nil {
+	if err := t.Client.Connect(context.Background()); err != nil {
 		t.Fatalf("error connecting client: %v", err)
 	}
 }
@@ -788,7 +792,7 @@ func (t *T) verifyConstraints() error {
 
 	// Stop once we find a RunOnBlock that matches the current environment. Record all errors as we go because if we
 	// don't find any matching blocks, we want to report the comparison errors for each block.
-	var runOnErrors []error
+	runOnErrors := make([]error, 0, len(t.runOn))
 	for _, runOn := range t.runOn {
 		err := verifyRunOnBlockConstraint(runOn)
 		if err == nil {

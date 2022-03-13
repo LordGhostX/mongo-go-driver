@@ -94,7 +94,7 @@ type changeStreamConfig struct {
 	streamType     StreamType
 	collectionName string
 	databaseName   string
-	crypt          *driver.Crypt
+	crypt          driver.Crypt
 }
 
 func newChangeStream(ctx context.Context, config changeStreamConfig, pipeline interface{},
@@ -141,7 +141,23 @@ func newChangeStream(ctx context.Context, config changeStreamConfig, pipeline in
 		cs.cursorOptions.BatchSize = *cs.options.BatchSize
 	}
 	if cs.options.MaxAwaitTime != nil {
-		cs.cursorOptions.MaxTimeMS = int64(time.Duration(*cs.options.MaxAwaitTime) / time.Millisecond)
+		cs.cursorOptions.MaxTimeMS = int64(*cs.options.MaxAwaitTime / time.Millisecond)
+	}
+	if cs.options.CustomOptions != nil {
+		// Marshal all custom options before passing to the initial aggregate. Return
+		// any errors from Marshaling.
+		customOptions := make(map[string]bsoncore.Value)
+		for optionName, optionValue := range cs.options.CustomOptions {
+			bsonType, bsonData, err := bson.MarshalValueWithRegistry(cs.registry, optionValue)
+			if err != nil {
+				cs.err = err
+				closeImplicitSession(cs.sess)
+				return nil, cs.Err()
+			}
+			optionValueBSON := bsoncore.Value{Type: bsonType, Data: bsonData}
+			customOptions[optionName] = optionValueBSON
+		}
+		cs.aggregate.CustomOptions(customOptions)
 	}
 
 	switch cs.streamType {
@@ -212,7 +228,7 @@ func (cs *ChangeStream) executeOperation(ctx context.Context, resuming bool) err
 	cs.aggregate.Deployment(cs.createOperationDeployment(server, conn))
 
 	if resuming {
-		cs.replaceOptions(ctx, cs.wireVersion)
+		cs.replaceOptions(cs.wireVersion)
 
 		csOptDoc := cs.createPipelineOptionsDoc()
 		pipIdx, pipDoc := bsoncore.AppendDocumentStart(nil)
@@ -408,7 +424,7 @@ func (cs *ChangeStream) pipelineToBSON() (bsoncore.Document, error) {
 	return pipelineArr, cs.err
 }
 
-func (cs *ChangeStream) replaceOptions(ctx context.Context, wireVersion *description.VersionRange) {
+func (cs *ChangeStream) replaceOptions(wireVersion *description.VersionRange) {
 	// Cached resume token: use the resume token as the resumeAfter option and set no other resume options
 	if cs.resumeToken != nil {
 		cs.options.SetResumeAfter(cs.resumeToken)

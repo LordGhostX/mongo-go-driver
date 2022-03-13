@@ -44,7 +44,6 @@ type TestCase struct {
 
 	initialData     []*collectionData
 	createEntities  []map[string]*entityOptions
-	fileReqs        []mtest.RunOnBlock
 	killAllSessions bool
 	schemaVersion   string
 
@@ -130,7 +129,6 @@ func runTestFile(t *testing.T, filepath string, expectValidFail bool, opts ...*O
 			if err != nil {
 				mt.Fatal(err)
 			}
-			return
 		})
 	}
 }
@@ -205,7 +203,7 @@ func (tc *TestCase) Run(ls LoggerSkipper) error {
 		return fmt.Errorf("schema version %q not supported: %v", tc.schemaVersion, err)
 	}
 
-	testCtx := newTestContext(mtest.Background, tc.entities)
+	testCtx := newTestContext(context.Background(), tc.entities)
 
 	defer func() {
 		// If anything fails while doing test cleanup, we only log the error because the actual test may have already
@@ -224,7 +222,7 @@ func (tc *TestCase) Run(ls LoggerSkipper) error {
 		// if the test attempted to commit/abort the transaction because an abortTransaction command can fail if it's
 		// sent to a mongos that isn't aware of the transaction.
 		if tc.startsTransaction() && tc.killAllSessions {
-			if err := terminateOpenSessions(mtest.Background); err != nil {
+			if err := terminateOpenSessions(context.Background()); err != nil {
 				ls.Logf("error terminating open transactions after failed test: %v", err)
 			}
 		}

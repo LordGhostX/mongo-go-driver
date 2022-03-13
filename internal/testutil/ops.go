@@ -24,7 +24,7 @@ import (
 
 // AutoCreateIndexes creates an index in the test cluster.
 func AutoCreateIndexes(t *testing.T, keys []string) {
-	var elems [][]byte
+	elems := make([][]byte, 0, len(keys))
 	for _, k := range keys {
 		elems = append(elems, bsoncore.AppendInt32Element(nil, k, 1))
 	}
@@ -52,13 +52,6 @@ func DropCollection(t *testing.T, dbname, colname string) {
 	if de, ok := err.(driver.Error); err != nil && !(ok && de.NamespaceNotFound()) {
 		require.NoError(t, err)
 	}
-}
-
-func autoDropDB(t *testing.T, topo *topology.Topology) {
-	err := operation.NewCommand(bsoncore.BuildDocument(nil, bsoncore.AppendInt32Element(nil, "dropDatabase", 1))).
-		Database(DBName(t)).ServerSelector(description.WriteSelector()).Deployment(topo).
-		Execute(context.Background())
-	require.NoError(t, err)
 }
 
 // AutoInsertDocs inserts the docs into the test cluster.
